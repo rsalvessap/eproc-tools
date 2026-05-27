@@ -7,8 +7,11 @@ Userscript para **registrar ações no eProc** durante testes de homologação d
 ## Instalação
 
 1. Instale a extensão [Tampermonkey](https://www.tampermonkey.net/) no Chrome/Edge/Firefox
-2. Clique em **"Instalar novo script"** no Tampermonkey
-3. Cole o conteúdo de `eproc-test-recorder.user.js` ou arraste o arquivo para a extensão
+2. Clique no link abaixo para instalar diretamente:
+
+**[⬇ Instalar script](https://raw.githubusercontent.com/rsalvessap/eproc-tools/main/eproc-test-recorder/eproc-test-recorder.user.js)**
+
+> O Tampermonkey detecta o arquivo `.user.js` automaticamente e abre a tela de instalação.
 
 > **Requisito:** O Tampermonkey precisa de permissão para acessar `cdnjs.cloudflare.com` (onde a biblioteca de captura de tela é carregada). Se o ambiente bloquear esse CDN, os prints continuam funcionando — mas apenas com descrição textual, sem captura automática da tela.
 
