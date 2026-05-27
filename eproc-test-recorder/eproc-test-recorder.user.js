@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eProc - Gravador de Testes para Homologação
 // @namespace    eproc-gravador-testes
-// @version      4.2.0
+// @version      4.3.0
 // @description  Registra ações, captura prints e gera relatórios de homologação
 // @author       Gerado via Claude
 // @include      *://eproc*.tjsp.jus.br/*
@@ -781,6 +781,114 @@
   }
 
   // ────────────────────────────────────────────────
+  //  NARRATIVA — converte passos em texto fluido
+  // ────────────────────────────────────────────────
+  function generateNarrative(steps) {
+    const CONN = [
+      'Em seguida,', 'Então,', 'A seguir,', 'Após isso,',
+      'Na sequência,', 'Depois disso,', 'Por sua vez,', 'Logo após,',
+    ];
+    let ci = 0;
+    const conn = () => CONN[ci++ % CONN.length];
+
+    const parts = [];
+    let lastPage = null;
+
+    for (const s of steps) {
+      // Transição de página
+      if (s.pageTitle && s.pageTitle !== lastPage && !['inicio', 'print_auto', 'print_manual'].includes(s.type)) {
+        if (lastPage === null) {
+          parts.push(`O usuário acessa a página <strong>"${esc(s.pageTitle)}"</strong>.`);
+        } else {
+          parts.push(`${conn()} navega para a página <strong>"${esc(s.pageTitle)}"</strong>.`);
+        }
+        lastPage = s.pageTitle;
+      }
+
+      if (s.type === 'inicio') {
+        const title = s.description.replace('Gravação iniciada — ', '').trim();
+        lastPage = s.pageTitle;
+        if (!parts.length) parts.push(`O usuário inicia o teste na página <strong>"${esc(title)}"</strong>.`);
+        continue;
+      }
+
+      const sentence = stepToNarrative(s);
+      if (!sentence) continue;
+
+      // Primeiro item narrativo real
+      if (parts.length === 0) {
+        parts.push(`O usuário ${sentence}.`);
+      } else {
+        parts.push(`${conn()} ${sentence}.`);
+      }
+    }
+
+    return parts.length ? parts.join(' ') : 'Nenhuma ação registrada.';
+  }
+
+  function stepToNarrative(s) {
+    const d = s.description;
+
+    switch (s.type) {
+      case 'inicio':
+      case 'navegacao':
+      case 'print_auto':
+      case 'print_manual':
+        return null;
+
+      case 'clique_botao': {
+        const m = d.match(/Botão clicado: "(.+)"/);
+        return `clica no botão <strong>"${esc(m ? m[1] : d)}"</strong>`;
+      }
+
+      case 'clique_link': {
+        const m = d.match(/Link clicado: "([^"]+)"/);
+        const act = d.match(/\(ação: ([^)]+)\)/);
+        const name = esc(m ? m[1] : d);
+        return `clica no link <strong>"${name}"</strong>${act ? ` (${esc(act[1])})` : ''}`;
+      }
+
+      case 'clique_menu': {
+        const m = d.match(/Clique em: "([^"]+)"/);
+        return `seleciona a opção <strong>"${esc(m ? m[1] : d)}"</strong>`;
+      }
+
+      case 'input': {
+        const m = d.match(/Campo "([^"]+)": "(.+)"/);
+        if (!m) return `preenche um campo de formulário`;
+        const val = m[2] === '(senha)' ? '<em>(senha omitida)</em>' : `<em>"${esc(m[2])}"</em>`;
+        return `preenche o campo <strong>"${esc(m[1])}"</strong> com ${val}`;
+      }
+
+      case 'select': {
+        const mSel = d.match(/Seleção: "([^"]+)" → "([^"]+)"/);
+        if (mSel) return `seleciona <strong>"${esc(mSel[2])}"</strong> no campo <strong>"${esc(mSel[1])}"</strong>`;
+        const mCb = d.match(/Checkbox (✓ marcado|✗ desmarcado): "([^"]+)"/);
+        if (mCb) return `${mCb[1] === '✓ marcado' ? 'marca' : 'desmarca'} a opção <strong>"${esc(mCb[2])}"</strong>`;
+        const mRd = d.match(/Rádio selecionado: "([^"]+)"/);
+        if (mRd) return `seleciona a opção <strong>"${esc(mRd[1])}"</strong>`;
+        return esc(d);
+      }
+
+      case 'submit': {
+        const m = d.match(/Formulário enviado: "([^"]+)"/);
+        return m ? `submete o formulário <strong>"${esc(m[1])}"</strong>` : `submete o formulário`;
+      }
+
+      case 'popup_aberto': {
+        const m = d.match(/Popup aberto: "([^"]+)"/);
+        return m ? `um popup é exibido: <strong>"${esc(m[1])}"</strong>` : `um popup é exibido na tela`;
+      }
+
+      case 'anotacao':
+        return `<span style="color:#718096">[Observação: ${esc(d)}]</span>`;
+
+      default:
+        return null;
+    }
+  }
+
+  // ────────────────────────────────────────────────
   //  EXPORTAR — relatório HTML com prints embutidos
   // ────────────────────────────────────────────────
   function exportReport() {
@@ -821,14 +929,20 @@
     }).join('');
 
     const printCount = steps.filter(s => getShot(s.num)).length;
+    const narrative = generateNarrative(steps);
+
     const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
 <title>Relatório de Testes eProc — ${dBR}</title>
 <style>
 *{box-sizing:border-box}
 body{font-family:'Segoe UI',Arial,sans-serif;background:#f7fafc;color:#2d3748;margin:0;padding:20px;font-size:13px}
 h1{margin:0 0 4px;font-size:20px;color:#e8eaf0}
+h2{margin:0 0 10px;font-size:14px;font-weight:700;color:#2d3748}
 .hdr{background:#1a202c;border-radius:8px;padding:20px 24px;margin-bottom:18px}
 .meta{font-size:11px;color:#718096;display:flex;gap:18px;flex-wrap:wrap;margin-top:8px}
+.narr{background:#fff;border-radius:8px;padding:18px 24px;margin-bottom:18px;box-shadow:0 1px 4px rgba(0,0,0,.08);border-left:4px solid #553c9a}
+.narr-text{font-size:13px;color:#4a5568;line-height:2;margin:0}
+.narr-text strong{color:#1a202c}
 table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 th{background:#2d3748;color:#a0aec0;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:8px 10px;text-align:left}
 td{padding:9px 10px;border-bottom:1px solid #edf2f7;vertical-align:top}
@@ -841,21 +955,26 @@ tr:hover td{background:#f7fafc}
 .badge{border-radius:4px;padding:2px 7px;font-size:10px;font-weight:700;white-space:nowrap;display:inline-block}
 @media print{
   body{background:#fff;padding:10px}
-  .hdr{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .hdr,.narr{-webkit-print-color-adjust:exact;print-color-adjust:exact}
   .badge{-webkit-print-color-adjust:exact;print-color-adjust:exact}
   img{max-width:100% !important;page-break-inside:avoid}
   tr{page-break-inside:avoid}
+  .narr{page-break-inside:avoid}
 }
 </style></head><body>
 <div class="hdr">
   <h1>📋 Relatório de Testes — eProc</h1>
-  <p style="margin:4px 0 0;color:#718096;font-size:12px">Gravador de Testes para Homologação v4.0</p>
+  <p style="margin:4px 0 0;color:#718096;font-size:12px">Gravador de Testes para Homologação v4.3</p>
   <div class="meta">
     <span>📅 ${dBR} às ${tBR}</span>
     <span>📌 ${steps.length} passos registrados</span>
     ${printCount > 0 ? `<span>📷 ${printCount} print${printCount!==1?'s':''} capturado${printCount!==1?'s':''}</span>` : ''}
     <span>🌐 ${esc(steps[0]?.pageTitle||'')}</span>
   </div>
+</div>
+<div class="narr">
+  <h2>📝 Narrativa de Uso</h2>
+  <p class="narr-text">${narrative}</p>
 </div>
 <table>
   <thead><tr>
