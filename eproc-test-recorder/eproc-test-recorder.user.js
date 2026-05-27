@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eProc - Gravador de Testes para Homologação
 // @namespace    eproc-gravador-testes
-// @version      4.1.0
+// @version      4.2.0
 // @description  Registra ações, captura prints e gera relatórios de homologação
 // @author       Gerado via Claude
 // @include      *://eproc*.tjsp.jus.br/*
@@ -24,11 +24,14 @@
     try { sessionStorage.setItem(k, JSON.stringify(v)); } catch {}
   }
 
-  let recording  = ss(SK.rec)   || false;
-  let steps      = ss(SK.steps) || [];
-  let counter    = ss(SK.count) || 0;
+  let recording  = ss(SK.rec)    || false;
+  let steps      = ss(SK.steps)  || [];
+  let counter    = ss(SK.count)  || 0;
+  let autoShot   = ss('eprec_autoshot') ?? true; // captura automática em eventos-chave
+  let autoShotBtn = ss('eprec_autoshotbtn') || false; // captura após cada botão/link
   let popObs     = null;
   let pendingCapture = null;
+  let captureInProgress = false; // evita capturas simultâneas
 
   // Screenshots — persistidos no sessionStorage para sobreviver navegações entre páginas.
   // Prefixo separado para não colidir com os outros dados.
@@ -128,6 +131,20 @@
 
     #eprec-hint { font-size: 10px; color: #2d3748; margin-top: 7px; line-height: 1.5; }
 
+    /* Toggles de auto-captura */
+    .eprec-toggle-row { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+    .eprec-toggle {
+      position: relative; width: 28px; height: 15px; flex-shrink: 0; cursor: pointer;
+      background: #2d3748; border-radius: 99px; transition: background .2s;
+    }
+    .eprec-toggle.on { background: #276749; }
+    .eprec-toggle::after {
+      content: ''; position: absolute; top: 2px; left: 2px;
+      width: 11px; height: 11px; border-radius: 50%; background: #fff; transition: left .2s;
+    }
+    .eprec-toggle.on::after { left: 15px; }
+    .eprec-toggle-lbl { font-size: 10px; color: #4a5568; flex: 1; }
+
     #eprec-log { display: none; max-height: 90px; overflow-y: auto; background: #080b12; border-radius: 5px; padding: 4px 6px; margin-top: 7px; }
     .el { font-size: 10px; color: #2d3748; padding: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .el.hi { color: #63b3ed; }
@@ -191,6 +208,16 @@
         </div>
         <button class="eb eb-export" id="eprec-btn-exp" style="display:none">⬇ Exportar Relatório</button>
         <button class="eb eb-clear"  id="eprec-btn-clr" style="display:none">🗑 Limpar</button>
+        <div id="eprec-autorow" style="display:none;margin-top:7px;border-top:1px solid #1e2533;padding-top:7px">
+          <div class="eprec-toggle-row">
+            <div class="eprec-toggle" id="eprec-tog-events"></div>
+            <span class="eprec-toggle-lbl">📷 Auto em submit/popup/navegação</span>
+          </div>
+          <div class="eprec-toggle-row">
+            <div class="eprec-toggle" id="eprec-tog-btn"></div>
+            <span class="eprec-toggle-lbl">📷 Auto em todo botão/link</span>
+          </div>
+        </div>
         <div id="eprec-hint"></div>
         <div id="eprec-logtoggle">▸ log</div>
         <div id="eprec-log"></div>
@@ -228,6 +255,8 @@
     document.getElementById('eprec-btn-note').addEventListener('click', e => { e.stopPropagation(); openNoteModal(); });
     document.getElementById('eprec-btn-exp').addEventListener('click',  e => { e.stopPropagation(); exportReport(); });
     document.getElementById('eprec-btn-clr').addEventListener('click',  e => { e.stopPropagation(); clearAll(); });
+    document.getElementById('eprec-tog-events').addEventListener('click', e => { e.stopPropagation(); toggleAutoShot(); });
+    document.getElementById('eprec-tog-btn').addEventListener('click',   e => { e.stopPropagation(); toggleAutoShotBtn(); });
 
     refreshUI();
   }
@@ -335,6 +364,28 @@
   // ────────────────────────────────────────────────
   function toggleRec() { if (recording) stopRec(); else startRec(); }
 
+  function toggleAutoShot() {
+    autoShot = !autoShot;
+    ss('eprec_autoshot', autoShot);
+    refreshUI();
+  }
+
+  function toggleAutoShotBtn() {
+    autoShotBtn = !autoShotBtn;
+    ss('eprec_autoshotbtn', autoShotBtn);
+    refreshUI();
+  }
+
+  // Captura automática: aguarda a UI atualizar antes de tirar o print
+  async function autoCapture(type, desc, delayMs) {
+    if (!recording || captureInProgress) return;
+    captureInProgress = true;
+    await new Promise(r => setTimeout(r, delayMs));
+    const img = await captureScreenshot();
+    captureInProgress = false;
+    addStep(type, desc, img);
+  }
+
   function startRec() {
     recording = true;
     ss(SK.rec, true);
@@ -368,18 +419,26 @@
     const n = steps.length;
     cnt.textContent = `${n} passo${n!==1?'s':''}`;
 
+    const autoRow = document.getElementById('eprec-autorow');
+    const togEv   = document.getElementById('eprec-tog-events');
+    const togBtn  = document.getElementById('eprec-tog-btn');
+    if (togEv)  togEv.className  = 'eprec-toggle' + (autoShot    ? ' on' : '');
+    if (togBtn) togBtn.className = 'eprec-toggle' + (autoShotBtn ? ' on' : '');
+
     if (recording) {
       led.className = 'on'; lbl.className = 'on'; lbl.textContent = '● GRAVANDO';
       head.className = 'on'; cnt.className = 'on'; stat.className = 'on';
       stat.textContent = 'Registrando ações…';
       btnR.className = 'eb eb-stop'; btnR.textContent = '⏹ Parar Gravação';
       mid.style.display = 'flex'; btnE.style.display = 'none'; btnC.style.display = 'none';
-      hint.innerHTML = '<span style="color:#2d3748;font-size:10px">Cliques, seleções e campos preenchidos são registrados automaticamente.<br>Use 📷 para capturar a tela ou ✏️ para anotações.</span>';
+      if (autoRow) autoRow.style.display = 'block';
+      hint.innerHTML = '<span style="color:#2d3748;font-size:10px">Use 📷 para print manual ou ✏️ para anotações.</span>';
     } else {
       led.className = ''; lbl.className = ''; lbl.textContent = 'Gravador';
       head.className = ''; cnt.className = '';
       btnR.className = 'eb eb-start'; btnR.textContent = '▶ Iniciar Gravação';
       mid.style.display = 'none'; hint.innerHTML = '';
+      if (autoRow) autoRow.style.display = 'none';
       if (n > 0) {
         stat.className = 'off';
         stat.textContent = `Parado. ${n} passo${n!==1?'s':''} gravado${n!==1?'s':''}.`;
@@ -501,7 +560,13 @@
       : ['tab','menuitem','treeitem','option'].includes(role) ? 'clique_menu'
       : 'clique_botao';
 
+    // Registra o clique imediatamente
     setTimeout(() => addStep(type, desc), 0);
+
+    // Se "auto em todo botão/link" ligado, captura após a UI atualizar
+    if (autoShotBtn) {
+      autoCapture('print_auto', '📷 ' + desc, 900);
+    }
   }
 
   // Sobe até 7 níveis procurando elemento clicável
@@ -591,7 +656,12 @@
     const form = e.target;
     if (form.closest('#eprec')) return;
     const id = form.id || form.name || (form.action || '').split('/').pop() || 'formulário';
-    setTimeout(() => addStep('submit', `Formulário enviado: "${id}"`), 0);
+    if (autoShot) {
+      // Captura após 1.2s para dar tempo da resposta aparecer
+      autoCapture('print_auto', `📷 Print automático após envio: "${id}"`, 1200);
+    } else {
+      setTimeout(() => addStep('submit', `Formulário enviado: "${id}"`), 0);
+    }
   }
 
   // ────────────────────────────────────────────────
@@ -668,7 +738,12 @@
           if (node.id && ['eprec','eprec-modal','eprec-floatind'].includes(node.id)) continue;
           if (isPopup(node)) {
             const desc = descPopup(node);
-            setTimeout(() => addStep('popup_aberto', 'Popup aberto: ' + desc), 0);
+            if (autoShot) {
+              // Captura após 600ms para o popup terminar de renderizar
+              autoCapture('print_auto', '📷 Print automático — Popup aberto: ' + desc, 600);
+            } else {
+              setTimeout(() => addStep('popup_aberto', 'Popup aberto: ' + desc), 0);
+            }
           }
         }
       }
@@ -696,7 +771,12 @@
     if (recording) {
       attachListeners();
       observePopups();
-      setTimeout(() => addStep('navegacao', 'Nova página: ' + document.title), 300);
+      if (autoShot) {
+        // Captura a nova página após ela carregar
+        autoCapture('print_auto', '📷 Print automático — Nova página: ' + document.title, 800);
+      } else {
+        setTimeout(() => addStep('navegacao', 'Nova página: ' + document.title), 300);
+      }
     }
   }
 
@@ -721,6 +801,7 @@
       select:       ['#1a365d','#90cdf4','SELEÇÃO'],
       input:        ['#1a2744','#bee3f8','INPUT'],
       print_manual: ['#4a3000','#fefcbf','PRINT'],
+      print_auto:   ['#1a3000','#c6f6d5','PRINT AUTO'],
       navegacao:    ['#322659','#e9d8fd','NAVEGAÇÃO'],
     };
 
