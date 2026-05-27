@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eProc - Gravador de Testes para Homologação
 // @namespace    eproc-gravador-testes
-// @version      4.0.0
+// @version      4.1.0
 // @description  Registra ações, captura prints e gera relatórios de homologação
 // @author       Gerado via Claude
 // @include      *://eproc*.tjsp.jus.br/*
@@ -29,7 +29,41 @@
   let counter    = ss(SK.count) || 0;
   let popObs     = null;
   let pendingCapture = null;
-  const screenshots = {}; // num_passo → base64 (só em memória, não persiste entre páginas)
+
+  // Screenshots — persistidos no sessionStorage para sobreviver navegações entre páginas.
+  // Prefixo separado para não colidir com os outros dados.
+  const SHOT_PFX = 'eprec_shot_';
+  const screenshots = {}; // cache em memória para acesso rápido
+
+  function saveShot(num, dataUrl) {
+    screenshots[num] = dataUrl;
+    try { sessionStorage.setItem(SHOT_PFX + num, dataUrl); } catch {}
+  }
+
+  function getShot(num) {
+    return screenshots[num] || sessionStorage.getItem(SHOT_PFX + num) || null;
+  }
+
+  function clearShots() {
+    Object.keys(screenshots).forEach(k => delete screenshots[k]);
+    const toRemove = [];
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const k = sessionStorage.key(i);
+      if (k && k.startsWith(SHOT_PFX)) toRemove.push(k);
+    }
+    toRemove.forEach(k => sessionStorage.removeItem(k));
+  }
+
+  // Pré-carregar no cache qualquer screenshot já salvo (ex: após navegação de página)
+  function loadShotsFromStorage() {
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const k = sessionStorage.key(i);
+      if (k && k.startsWith(SHOT_PFX)) {
+        const num = parseInt(k.slice(SHOT_PFX.length), 10);
+        if (!isNaN(num)) screenshots[num] = sessionStorage.getItem(k);
+      }
+    }
+  }
 
   // ────────────────────────────────────────────────
   //  ESTILOS
@@ -372,7 +406,7 @@
       pageTitle: document.title,
     };
 
-    if (screenshot) screenshots[counter] = screenshot;
+    if (screenshot) saveShot(counter, screenshot);
 
     steps.push(step);
     ss(SK.steps, steps);
@@ -395,7 +429,7 @@
     if (!confirm('Limpar todos os passos gravados?')) return;
     steps = []; counter = 0;
     ss(SK.steps, []); ss(SK.count, 0);
-    Object.keys(screenshots).forEach(k => delete screenshots[k]);
+    clearShots();
     document.getElementById('eprec-log').innerHTML = '';
     refreshUI();
   }
@@ -407,34 +441,28 @@
   //  e o fluxo cai para descrição manual.
   // ────────────────────────────────────────────────
   async function captureScreenshot() {
-    if (typeof html2canvas === 'undefined') return null;
+    if (typeof html2canvas === 'undefined') {
+      console.warn('[eprec] html2canvas não carregou (CDN bloqueado?)');
+      return null;
+    }
 
-    // Usar visibility:hidden para ocultar sem afetar o layout
-    const hideEls = ['eprec', 'eprec-floatind'];
-    const saved = {};
-    hideEls.forEach(id => {
-      const el = document.getElementById(id);
-      if (el) { saved[id] = el.style.visibility; el.style.visibility = 'hidden'; }
-    });
+    // ignoreElements exclui completamente o painel da captura (mais confiável que visibility:hidden)
+    const IGNORE_IDS = new Set(['eprec', 'eprec-floatind', 'eprec-modal']);
 
     try {
-      const canvas = await html2canvas(document.documentElement, {
+      const canvas = await html2canvas(document.body, {
         scale: 0.65,
         useCORS: true,
         allowTaint: true,
         logging: false,
         removeContainer: true,
-        imageTimeout: 4000,
+        imageTimeout: 5000,
+        ignoreElements: el => IGNORE_IDS.has(el.id),
       });
       return canvas.toDataURL('image/jpeg', 0.78);
     } catch (err) {
       console.warn('[eprec] html2canvas falhou:', err.message);
       return null;
-    } finally {
-      hideEls.forEach(id => {
-        const el = document.getElementById(id);
-        if (el && saved[id] !== undefined) el.style.visibility = saved[id];
-      });
     }
   }
 
@@ -698,8 +726,9 @@
 
     const rows = steps.map(s => {
       const [bg, fg, lbl] = BADGE[s.type] || ['#2d3748','#e2e8f0', s.type.toUpperCase()];
-      const img = screenshots[s.num]
-        ? `<div style="margin-top:8px"><img src="${screenshots[s.num]}" style="max-width:700px;width:100%;border-radius:4px;border:1px solid #e2e8f0;display:block"></div>`
+      const shotData = getShot(s.num);
+      const img = shotData
+        ? `<div style="margin-top:8px"><img src="${shotData}" style="max-width:700px;width:100%;border-radius:4px;border:1px solid #e2e8f0;display:block"></div>`
         : '';
       return `<tr>
         <td class="tc">${s.num}</td>
@@ -710,7 +739,7 @@
       </tr>`;
     }).join('');
 
-    const printCount = steps.filter(s => screenshots[s.num]).length;
+    const printCount = steps.filter(s => getShot(s.num)).length;
     const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
 <title>Relatório de Testes eProc — ${dBR}</title>
 <style>
@@ -775,6 +804,7 @@ tr:hover td{background:#f7fafc}
   //  INIT
   // ────────────────────────────────────────────────
   function init() {
+    loadShotsFromStorage(); // recupera screenshots de navegações anteriores
     const run = () => { buildPanel(); buildModal(); resumeIfNeeded(); };
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', run);
