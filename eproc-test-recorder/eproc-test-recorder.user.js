@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eProc - Gravador de Testes para Homologação
 // @namespace    eproc-gravador-testes
-// @version      4.3.0
+// @version      5.0.0
 // @description  Registra ações, captura prints e gera relatórios de homologação
 // @author       Gerado via Claude
 // @include      *://eproc*.tjsp.jus.br/*
@@ -16,27 +16,47 @@
 (function () {
   'use strict';
 
-  // Estado persistido em sessionStorage (sobrevive navegações internas)
-  const SK = { rec: 'eprec_rec', steps: 'eprec_steps', count: 'eprec_count' };
+  // ────────────────────────────────────────────────
+  //  STORAGE KEYS
+  // ────────────────────────────────────────────────
+  const SK = {
+    rec:       'eprec_rec',
+    steps:     'eprec_steps',
+    count:     'eprec_count',
+    sessions:  'eprec_sessions',   // FIX #5: histórico de sessões anteriores
+    sessId:    'eprec_sess_id',     // ID da sessão atual
+    autoshot:  'eprec_autoshot',
+    autoshotbtn: 'eprec_autoshotbtn',
+  };
+  const SHOT_PFX = 'eprec_shot_';
 
   function ss(k, v) {
     if (v === undefined) { try { return JSON.parse(sessionStorage.getItem(k)); } catch { return null; } }
     try { sessionStorage.setItem(k, JSON.stringify(v)); } catch {}
   }
 
-  let recording  = ss(SK.rec)    || false;
-  let steps      = ss(SK.steps)  || [];
-  let counter    = ss(SK.count)  || 0;
-  let autoShot   = ss('eprec_autoshot') ?? true; // captura automática em eventos-chave
-  let autoShotBtn = ss('eprec_autoshotbtn') || false; // captura após cada botão/link
-  let popObs     = null;
-  let pendingCapture = null;
-  let captureInProgress = false; // evita capturas simultâneas
+  // ────────────────────────────────────────────────
+  //  ESTADO
+  // ────────────────────────────────────────────────
+  let recording    = ss(SK.rec)    || false;
+  let steps        = ss(SK.steps)  || [];
+  let counter      = ss(SK.count)  || 0;
+  let autoShot     = ss(SK.autoshot)    ?? true;
+  let autoShotBtn  = ss(SK.autoshotbtn) || false;
+  let currentSessId = ss(SK.sessId) || null;
 
-  // Screenshots — persistidos no sessionStorage para sobreviver navegações entre páginas.
-  // Prefixo separado para não colidir com os outros dados.
-  const SHOT_PFX = 'eprec_shot_';
-  const screenshots = {}; // cache em memória para acesso rápido
+  // FIX #5: Histórico de sessões (array de sessões completas)
+  let sessions = ss(SK.sessions) || [];
+
+  // FIX #3: Fila serializada de capturas para garantir ordem cronológica
+  let captureQueue = Promise.resolve();
+  let captureInProgress = false;
+
+  let popObs   = null;
+  let pendingCapture = null;
+
+  // Cache de screenshots em memória
+  const screenshots = {};
 
   function saveShot(num, dataUrl) {
     screenshots[num] = dataUrl;
@@ -47,17 +67,24 @@
     return screenshots[num] || sessionStorage.getItem(SHOT_PFX + num) || null;
   }
 
-  function clearShots() {
-    Object.keys(screenshots).forEach(k => delete screenshots[k]);
-    const toRemove = [];
-    for (let i = 0; i < sessionStorage.length; i++) {
-      const k = sessionStorage.key(i);
-      if (k && k.startsWith(SHOT_PFX)) toRemove.push(k);
+  function clearShots(nums) {
+    if (!nums) {
+      // Limpa tudo
+      Object.keys(screenshots).forEach(k => delete screenshots[k]);
+      const toRemove = [];
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const k = sessionStorage.key(i);
+        if (k && k.startsWith(SHOT_PFX)) toRemove.push(k);
+      }
+      toRemove.forEach(k => sessionStorage.removeItem(k));
+    } else {
+      nums.forEach(n => {
+        delete screenshots[n];
+        sessionStorage.removeItem(SHOT_PFX + n);
+      });
     }
-    toRemove.forEach(k => sessionStorage.removeItem(k));
   }
 
-  // Pré-carregar no cache qualquer screenshot já salvo (ex: após navegação de página)
   function loadShotsFromStorage() {
     for (let i = 0; i < sessionStorage.length; i++) {
       const k = sessionStorage.key(i);
@@ -74,7 +101,7 @@
   GM_addStyle(`
     #eprec {
       position: fixed !important; bottom: 18px !important; right: 18px !important;
-      z-index: 2147483647 !important; width: 245px;
+      z-index: 2147483647 !important; width: 255px;
       background: #12161f; color: #c9d1e0; border-radius: 10px;
       box-shadow: 0 6px 24px rgba(0,0,0,0.6);
       font: 13px/1.4 'Segoe UI', Arial, sans-serif !important;
@@ -90,7 +117,8 @@
     #eprec-head.on { background: #1f0b0b; border-bottom-color: #5c1a1a; }
 
     #eprec-led { width: 8px; height: 8px; border-radius: 50%; background: #2d3748; flex-shrink: 0; transition: background .3s; }
-    #eprec-led.on { background: #f56565; }
+    #eprec-led.on { background: #f56565; animation: blink 1.4s ease-in-out infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.35} }
 
     #eprec-label { flex: 1; font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: #4a5568; }
     #eprec-label.on { color: #f56565; }
@@ -123,6 +151,7 @@
     .eb-stop   { background: #4a0f0f; color: #feb2b2; }
     .eb-export { background: #1a365d; color: #90cdf4; }
     .eb-clear  { background: #1e2533; color: #718096; }
+    .eb-hist   { background: #2d1f44; color: #d6bcfa; }
 
     .eb-row { display: flex; gap: 5px; margin-bottom: 5px; }
     .eb-row .eb { margin-bottom: 0; }
@@ -131,7 +160,6 @@
 
     #eprec-hint { font-size: 10px; color: #2d3748; margin-top: 7px; line-height: 1.5; }
 
-    /* Toggles de auto-captura */
     .eprec-toggle-row { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
     .eprec-toggle {
       position: relative; width: 28px; height: 15px; flex-shrink: 0; cursor: pointer;
@@ -151,7 +179,15 @@
     #eprec-logtoggle { font-size: 10px; color: #2d3748; cursor: pointer; margin-top: 6px; text-align: right; }
     #eprec-logtoggle:hover { color: #4a5568; }
 
-    /* Modal */
+    /* Indicador de captura em progresso */
+    #eprec-capturing {
+      display: none; position: fixed !important; top: 10px !important; right: 10px !important;
+      z-index: 2147483648 !important; background: #276749; color: #9ae6b4;
+      font: 700 11px/1 'Segoe UI', Arial, sans-serif !important;
+      padding: 5px 10px; border-radius: 99px; pointer-events: none;
+    }
+
+    /* Modal de anotação */
     #eprec-modal {
       display: none; position: fixed !important; inset: 0;
       z-index: 2147483648 !important; background: rgba(0,0,0,.7);
@@ -160,15 +196,14 @@
     #eprec-modal.open { display: flex !important; }
     #eprec-mbox {
       background: #12161f; border: 1px solid #2a2f3d; border-radius: 10px;
-      padding: 18px; width: 420px; max-width: 92vw;
-      box-shadow: 0 20px 60px rgba(0,0,0,.7); font-family: 'Segoe UI', Arial, sans-serif;
+      padding: 18px; width: 460px; max-width: 92vw;
+      box-shadow: 0 20px 60px rgba(0,0,0,.7);
     }
     #eprec-mbox label { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #4a5568; margin-bottom: 7px; }
     #eprec-mthumb { display: none; width: 100%; border-radius: 5px; margin-bottom: 9px; border: 1px solid #2a2f3d; }
     #eprec-mtext {
       width: 100%; background: #080b12; border: 1px solid #2a2f3d; color: #c9d1e0;
-      border-radius: 5px; padding: 7px 9px; font-size: 13px;
-      font-family: 'Segoe UI', Arial, sans-serif; resize: vertical; min-height: 70px; outline: none;
+      border-radius: 5px; padding: 7px 9px; font-size: 13px; resize: vertical; min-height: 70px; outline: none;
     }
     #eprec-mtext:focus { border-color: #553c9a; }
     #eprec-mfooter { display: flex; gap: 7px; margin-top: 10px; justify-content: flex-end; }
@@ -176,7 +211,30 @@
     #eprec-mcancel { background: #1e2533; color: #718096; }
     #eprec-mok     { background: #553c9a; color: #fff; }
 
-    /* Indicador flutuante quando minimizado e gravando */
+    /* Modal de histórico */
+    #eprec-hist-modal {
+      display: none; position: fixed !important; inset: 0;
+      z-index: 2147483648 !important; background: rgba(0,0,0,.75);
+      align-items: flex-start; justify-content: center; padding-top: 40px;
+    }
+    #eprec-hist-modal.open { display: flex !important; }
+    #eprec-hist-box {
+      background: #12161f; border: 1px solid #2a2f3d; border-radius: 10px;
+      padding: 18px; width: 520px; max-width: 94vw; max-height: 70vh; overflow-y: auto;
+      box-shadow: 0 20px 60px rgba(0,0,0,.7);
+    }
+    #eprec-hist-box h3 { margin: 0 0 12px; font-size: 14px; color: #c9d1e0; }
+    .ehist-row {
+      display: flex; align-items: center; gap: 8px; padding: 8px 0;
+      border-bottom: 1px solid #1e2533; font-size: 12px;
+    }
+    .ehist-row:last-child { border-bottom: none; }
+    .ehist-info { flex: 1; color: #718096; }
+    .ehist-info strong { color: #c9d1e0; display: block; }
+    .ehist-btn { background: #1a365d; color: #90cdf4; border: none; border-radius: 5px; padding: 4px 10px; font-size: 11px; font-weight: 700; cursor: pointer; }
+    .ehist-btn:hover { filter: brightness(1.3); }
+    .ehist-del { background: #3d1515; color: #fc8181; }
+
     #eprec-floatind {
       display: none; position: fixed !important; bottom: 18px !important; right: 18px !important;
       z-index: 2147483646 !important; background: #4a0f0f; color: #feb2b2;
@@ -207,7 +265,10 @@
           <button class="eb eb-note" id="eprec-btn-note">✏️ Nota</button>
         </div>
         <button class="eb eb-export" id="eprec-btn-exp" style="display:none">⬇ Exportar Relatório</button>
-        <button class="eb eb-clear"  id="eprec-btn-clr" style="display:none">🗑 Limpar</button>
+        <div class="eb-row" id="eprec-bottom-row" style="display:none">
+          <button class="eb eb-hist" id="eprec-btn-hist">📚 Histórico</button>
+          <button class="eb eb-clear" id="eprec-btn-clr">🗑 Limpar</button>
+        </div>
         <div id="eprec-autorow" style="display:none;margin-top:7px;border-top:1px solid #1e2533;padding-top:7px">
           <div class="eprec-toggle-row">
             <div class="eprec-toggle" id="eprec-tog-events"></div>
@@ -229,16 +290,19 @@
     ind.textContent = '● REC';
     document.body.appendChild(ind);
 
+    const cap = document.createElement('div');
+    cap.id = 'eprec-capturing';
+    cap.textContent = '📷 capturando…';
+    document.body.appendChild(cap);
+
     drag(p, document.getElementById('eprec-head'));
 
-    // Minimizar
     let mini = false;
     document.getElementById('eprec-min').addEventListener('click', () => {
       mini = !mini;
       document.getElementById('eprec-body').style.display = mini ? 'none' : 'block';
       document.getElementById('eprec-head').style.borderRadius = mini ? '10px' : '10px 10px 0 0';
       document.getElementById('eprec-min').textContent = mini ? '▲' : '▼';
-      p.style.display = mini ? 'none' : 'block';
       if (mini) document.getElementById('eprec-floatind').style.display = recording ? 'block' : 'none';
     });
 
@@ -253,8 +317,9 @@
     document.getElementById('eprec-btn-rec').addEventListener('click',  e => { e.stopPropagation(); toggleRec(); });
     document.getElementById('eprec-btn-shot').addEventListener('click', e => { e.stopPropagation(); openShotModal(); });
     document.getElementById('eprec-btn-note').addEventListener('click', e => { e.stopPropagation(); openNoteModal(); });
-    document.getElementById('eprec-btn-exp').addEventListener('click',  e => { e.stopPropagation(); exportReport(); });
-    document.getElementById('eprec-btn-clr').addEventListener('click',  e => { e.stopPropagation(); clearAll(); });
+    document.getElementById('eprec-btn-exp').addEventListener('click',  e => { e.stopPropagation(); pickExportTarget(); });
+    document.getElementById('eprec-btn-clr').addEventListener('click',  e => { e.stopPropagation(); clearCurrent(); });
+    document.getElementById('eprec-btn-hist').addEventListener('click', e => { e.stopPropagation(); openHistModal(); });
     document.getElementById('eprec-tog-events').addEventListener('click', e => { e.stopPropagation(); toggleAutoShot(); });
     document.getElementById('eprec-tog-btn').addEventListener('click',   e => { e.stopPropagation(); toggleAutoShotBtn(); });
 
@@ -268,7 +333,7 @@
     m.innerHTML = `
       <div id="eprec-mbox">
         <label id="eprec-mlabel">Anotação</label>
-        <img id="eprec-mthumb" alt="Screenshot capturado">
+        <img id="eprec-mthumb" alt="">
         <textarea id="eprec-mtext" placeholder="Descreva o que está sendo testado..."></textarea>
         <div id="eprec-mfooter">
           <button class="emb" id="eprec-mcancel">Cancelar</button>
@@ -281,7 +346,97 @@
     m.addEventListener('click', e => { if (e.target === m) closeModal(); });
   }
 
-  let modalMode = 'note'; // 'note' | 'shot'
+  // ────────────────────────────────────────────────
+  //  MODAL DE HISTÓRICO  (FIX #5)
+  // ────────────────────────────────────────────────
+  function buildHistModal() {
+    if (document.getElementById('eprec-hist-modal')) return;
+    const m = document.createElement('div');
+    m.id = 'eprec-hist-modal';
+    m.innerHTML = `<div id="eprec-hist-box">
+      <h3>📚 Histórico de Gravações</h3>
+      <div id="eprec-hist-list"></div>
+    </div>`;
+    document.body.appendChild(m);
+    m.addEventListener('click', e => { if (e.target === m) closeHistModal(); });
+  }
+
+  function openHistModal() {
+    buildHistModal();
+    renderHistList();
+    document.getElementById('eprec-hist-modal').classList.add('open');
+  }
+
+  function closeHistModal() {
+    const m = document.getElementById('eprec-hist-modal');
+    if (m) m.classList.remove('open');
+  }
+
+  function renderHistList() {
+    const list = document.getElementById('eprec-hist-list');
+    if (!list) return;
+    const all = getSessions();
+    if (!all.length) {
+      list.innerHTML = '<p style="color:#4a5568;font-size:12px">Nenhuma gravação anterior encontrada.</p>';
+      return;
+    }
+    list.innerHTML = all.map((sess, idx) => `
+      <div class="ehist-row">
+        <div class="ehist-info">
+          <strong>${esc(sess.title || 'Sessão ' + (idx + 1))}</strong>
+          ${esc(sess.date)} — ${sess.steps.length} passos
+          ${sess.printCount ? ` — ${sess.printCount} print${sess.printCount !== 1 ? 's' : ''}` : ''}
+        </div>
+        <button class="ehist-btn" data-idx="${idx}">⬇ Exportar</button>
+        <button class="ehist-btn ehist-del" data-del="${idx}">🗑</button>
+      </div>`).join('');
+
+    list.querySelectorAll('[data-idx]').forEach(btn => {
+      btn.addEventListener('click', e => {
+        const idx = parseInt(e.target.dataset.idx, 10);
+        exportSession(all[idx]);
+      });
+    });
+    list.querySelectorAll('[data-del]').forEach(btn => {
+      btn.addEventListener('click', e => {
+        const idx = parseInt(e.target.dataset.del, 10);
+        if (confirm('Remover esta gravação do histórico?')) {
+          const updated = getSessions();
+          updated.splice(idx, 1);
+          ss(SK.sessions, updated);
+          sessions = updated;
+          renderHistList();
+        }
+      });
+    });
+  }
+
+  // FIX #5: Sessões persistidas em sessionStorage
+  function getSessions() {
+    return ss(SK.sessions) || [];
+  }
+
+  function saveSessionToHistory(stepsArr, shotsMap) {
+    const all = getSessions();
+    const title = (stepsArr[0]?.pageTitle || 'Gravação').substring(0, 60);
+    const now = new Date();
+    const printCount = stepsArr.filter(s => shotsMap[s.num]).length;
+    all.push({
+      id:         now.getTime(),
+      title,
+      date:       now.toLocaleString('pt-BR'),
+      steps:      stepsArr,
+      shots:      shotsMap,   // { num: dataUrl }
+      printCount,
+    });
+    ss(SK.sessions, all);
+    sessions = all;
+  }
+
+  // ────────────────────────────────────────────────
+  //  MODAL DE ANOTAÇÃO / PRINT MANUAL
+  // ────────────────────────────────────────────────
+  let modalMode = 'note';
 
   function openNoteModal() {
     if (!recording) return;
@@ -301,16 +456,16 @@
     modalMode = 'shot';
     pendingCapture = null;
 
-    // Desabilitar botão e indicar captura em andamento
     const btnShot = document.getElementById('eprec-btn-shot');
     if (btnShot) { btnShot.disabled = true; btnShot.textContent = '📷 Capturando…'; }
+    showCapturingIndicator(true);
 
     const imgData = await captureScreenshot();
     pendingCapture = imgData;
 
+    showCapturingIndicator(false);
     if (btnShot) { btnShot.disabled = false; btnShot.textContent = '📷 Print'; }
 
-    // Mostrar miniatura no modal se capturou com sucesso
     const thumb = document.getElementById('eprec-mthumb');
     if (thumb) {
       if (imgData) { thumb.src = imgData; thumb.style.display = 'block'; }
@@ -320,7 +475,7 @@
     document.getElementById('eprec-mlabel').textContent = imgData
       ? '📷 Tela capturada — adicione uma descrição'
       : '📷 Print (descreva o que está visível na tela)';
-    document.getElementById('eprec-mtext').placeholder = 'Ex: "Formulário de cadastro com campos preenchidos", "Mensagem de erro exibida", "Lista de processos filtrada por data"…';
+    document.getElementById('eprec-mtext').placeholder = 'Ex: "Formulário de cadastro", "Mensagem de erro", "Lista de processos"…';
     document.getElementById('eprec-mtext').value = '';
     document.getElementById('eprec-modal').classList.add('open');
     setTimeout(() => document.getElementById('eprec-mtext').focus(), 80);
@@ -336,13 +491,17 @@
   function saveModal() {
     const txt = document.getElementById('eprec-mtext').value.trim();
     if (modalMode === 'shot') {
-      const desc = txt || 'Print de tela registrado';
-      addStep('print_manual', '📷 ' + desc, pendingCapture);
+      addStep('print_manual', '📷 ' + (txt || 'Print de tela registrado'), pendingCapture);
     } else {
       if (!txt) { closeModal(); return; }
       addStep('anotacao', txt);
     }
     closeModal();
+  }
+
+  function showCapturingIndicator(visible) {
+    const el = document.getElementById('eprec-capturing');
+    if (el) el.style.display = visible ? 'block' : 'none';
   }
 
   // ────────────────────────────────────────────────
@@ -366,29 +525,32 @@
 
   function toggleAutoShot() {
     autoShot = !autoShot;
-    ss('eprec_autoshot', autoShot);
+    ss(SK.autoshot, autoShot);
     refreshUI();
   }
 
   function toggleAutoShotBtn() {
     autoShotBtn = !autoShotBtn;
-    ss('eprec_autoshotbtn', autoShotBtn);
+    ss(SK.autoshotbtn, autoShotBtn);
     refreshUI();
   }
 
-  // Captura automática: aguarda a UI atualizar antes de tirar o print
-  async function autoCapture(type, desc, delayMs) {
-    if (!recording || captureInProgress) return;
-    captureInProgress = true;
-    await new Promise(r => setTimeout(r, delayMs));
-    const img = await captureScreenshot();
-    captureInProgress = false;
-    addStep(type, desc, img);
-  }
-
   function startRec() {
+    // FIX #5: se já há passos de uma gravação anterior, salva no histórico antes de limpar
+    if (steps.length > 0) {
+      commitCurrentToHistory();
+    }
+
     recording = true;
+    steps = [];
+    counter = 0;
+    currentSessId = Date.now();
     ss(SK.rec, true);
+    ss(SK.steps, []);
+    ss(SK.count, 0);
+    ss(SK.sessId, currentSessId);
+    clearShots();
+
     attachListeners();
     observePopups();
     addStep('inicio', 'Gravação iniciada — ' + document.title);
@@ -403,6 +565,33 @@
     refreshUI();
   }
 
+  // FIX #5: Consolida passos atuais + screenshots no histórico
+  function commitCurrentToHistory() {
+    if (!steps.length) return;
+    // Coleta todos os screenshots da sessão atual em um mapa
+    const shotsMap = {};
+    steps.forEach(s => {
+      const img = getShot(s.num);
+      if (img) shotsMap[s.num] = img;
+    });
+    saveSessionToHistory([...steps], shotsMap);
+  }
+
+  // ────────────────────────────────────────────────
+  //  LIMPAR SESSÃO ATUAL
+  // ────────────────────────────────────────────────
+  function clearCurrent() {
+    if (!confirm('Limpar os passos da sessão atual? (O histórico de sessões anteriores é mantido)')) return;
+    steps = []; counter = 0;
+    ss(SK.steps, []); ss(SK.count, 0);
+    clearShots();
+    document.getElementById('eprec-log').innerHTML = '';
+    refreshUI();
+  }
+
+  // ────────────────────────────────────────────────
+  //  REFRESH UI
+  // ────────────────────────────────────────────────
   function refreshUI() {
     const led  = document.getElementById('eprec-led');
     const lbl  = document.getElementById('eprec-label');
@@ -412,12 +601,12 @@
     const btnR = document.getElementById('eprec-btn-rec');
     const mid  = document.getElementById('eprec-midrow');
     const btnE = document.getElementById('eprec-btn-exp');
-    const btnC = document.getElementById('eprec-btn-clr');
+    const botRow = document.getElementById('eprec-bottom-row');
     const hint = document.getElementById('eprec-hint');
     if (!led) return;
 
     const n = steps.length;
-    cnt.textContent = `${n} passo${n!==1?'s':''}`;
+    cnt.textContent = `${n} passo${n !== 1 ? 's' : ''}`;
 
     const autoRow = document.getElementById('eprec-autorow');
     const togEv   = document.getElementById('eprec-tog-events');
@@ -425,14 +614,17 @@
     if (togEv)  togEv.className  = 'eprec-toggle' + (autoShot    ? ' on' : '');
     if (togBtn) togBtn.className = 'eprec-toggle' + (autoShotBtn ? ' on' : '');
 
+    const histCount = getSessions().length;
+
     if (recording) {
       led.className = 'on'; lbl.className = 'on'; lbl.textContent = '● GRAVANDO';
       head.className = 'on'; cnt.className = 'on'; stat.className = 'on';
       stat.textContent = 'Registrando ações…';
       btnR.className = 'eb eb-stop'; btnR.textContent = '⏹ Parar Gravação';
-      mid.style.display = 'flex'; btnE.style.display = 'none'; btnC.style.display = 'none';
+      mid.style.display = 'flex'; btnE.style.display = 'none';
+      botRow.style.display = 'none';
       if (autoRow) autoRow.style.display = 'block';
-      hint.innerHTML = '<span style="color:#2d3748;font-size:10px">Use 📷 para print manual ou ✏️ para anotações.</span>';
+      hint.innerHTML = '<span style="color:#2d3748;font-size:10px">📷 Print manual ou ✏️ para anotações.</span>';
     } else {
       led.className = ''; lbl.className = ''; lbl.textContent = 'Gravador';
       head.className = ''; cnt.className = '';
@@ -441,33 +633,45 @@
       if (autoRow) autoRow.style.display = 'none';
       if (n > 0) {
         stat.className = 'off';
-        stat.textContent = `Parado. ${n} passo${n!==1?'s':''} gravado${n!==1?'s':''}.`;
-        btnE.style.display = ''; btnC.style.display = '';
+        stat.textContent = `Parado. ${n} passo${n !== 1 ? 's' : ''} gravado${n !== 1 ? 's' : ''}.`;
+        btnE.style.display = '';
+        botRow.style.display = 'flex';
+      } else if (histCount > 0) {
+        stat.className = ''; stat.textContent = `Pronto — ${histCount} sessão${histCount !== 1 ? 'ões' : ''} no histórico.`;
+        btnE.style.display = 'none';
+        botRow.style.display = 'flex';
+        document.getElementById('eprec-btn-clr').style.display = 'none';
       } else {
         stat.className = ''; stat.textContent = 'Pronto para gravar';
-        btnE.style.display = 'none'; btnC.style.display = 'none';
+        btnE.style.display = 'none';
+        botRow.style.display = 'none';
       }
       document.getElementById('eprec-floatind').style.display = 'none';
     }
   }
 
   // ────────────────────────────────────────────────
-  //  PASSOS
+  //  PASSOS — FIX #3: inserção síncrona com timestamp numérico
   // ────────────────────────────────────────────────
   function addStep(type, description, screenshot) {
     counter++;
     ss(SK.count, counter);
 
     const step = {
-      num: counter, type, description,
+      num:       counter,
+      type,
+      description,
+      tsNum:     Date.now(),           // FIX #3: timestamp numérico para ordenação exata
       timestamp: new Date().toLocaleString('pt-BR'),
-      url: location.href,
+      url:       location.href,
       pageTitle: document.title,
     };
 
     if (screenshot) saveShot(counter, screenshot);
 
     steps.push(step);
+    // FIX #3: Reordena por tsNum para garantir ordem mesmo em capturas assíncronas
+    steps.sort((a, b) => a.tsNum - b.tsNum);
     ss(SK.steps, steps);
     refreshUI();
     addLog(`#${step.num} ${description.substring(0, 55)}`);
@@ -484,30 +688,28 @@
     while (log.children.length > 50) log.removeChild(log.lastChild);
   }
 
-  function clearAll() {
-    if (!confirm('Limpar todos os passos gravados?')) return;
-    steps = []; counter = 0;
-    ss(SK.steps, []); ss(SK.count, 0);
-    clearShots();
-    document.getElementById('eprec-log').innerHTML = '';
-    refreshUI();
+  // ────────────────────────────────────────────────
+  //  CAPTURA — FIX #2 + #3
+  //  Fila serializada: cada captura aguarda a anterior terminar.
+  //  Desta forma os prints chegam em sequência, nunca fora de ordem.
+  // ────────────────────────────────────────────────
+  function enqueueCapture(type, desc, delayMs) {
+    captureQueue = captureQueue.then(async () => {
+      if (!recording) return;
+      showCapturingIndicator(true);
+      await sleep(delayMs);
+      const img = await captureScreenshot();
+      showCapturingIndicator(false);
+      addStep(type, desc, img);
+    });
   }
 
-  // ────────────────────────────────────────────────
-  //  CAPTURA DE TELA (html2canvas)
-  //  O painel fica invisível durante a captura para não aparecer no print.
-  //  Se html2canvas não estiver disponível (CSP bloqueou CDN), retorna null
-  //  e o fluxo cai para descrição manual.
-  // ────────────────────────────────────────────────
   async function captureScreenshot() {
     if (typeof html2canvas === 'undefined') {
-      console.warn('[eprec] html2canvas não carregou (CDN bloqueado?)');
+      console.warn('[eprec] html2canvas não carregou');
       return null;
     }
-
-    // ignoreElements exclui completamente o painel da captura (mais confiável que visibility:hidden)
-    const IGNORE_IDS = new Set(['eprec', 'eprec-floatind', 'eprec-modal']);
-
+    const IGNORE_IDS = new Set(['eprec', 'eprec-floatind', 'eprec-modal', 'eprec-capturing', 'eprec-hist-modal']);
     try {
       const canvas = await html2canvas(document.body, {
         scale: 0.65,
@@ -524,6 +726,8 @@
       return null;
     }
   }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
   // ────────────────────────────────────────────────
   //  LISTENERS
@@ -542,13 +746,11 @@
   }
 
   // ── CLICK
-  // Sobe na árvore DOM procurando o elemento clicável real.
-  // Captura além de <button> e <a>: qualquer elemento com onclick, role ou cursor:pointer.
   function onClick(e) {
     if (!recording) return;
     const el = e.target;
     if (!el) return;
-    if (el.closest('#eprec') || el.closest('#eprec-modal') || el.closest('#eprec-floatind')) return;
+    if (el.closest('#eprec') || el.closest('#eprec-modal') || el.closest('#eprec-floatind') || el.closest('#eprec-hist-modal')) return;
 
     const root = findClickable(el);
     if (!root) return;
@@ -560,16 +762,15 @@
       : ['tab','menuitem','treeitem','option'].includes(role) ? 'clique_menu'
       : 'clique_botao';
 
-    // Registra o clique imediatamente
-    setTimeout(() => addStep(type, desc), 0);
+    // FIX #1: registra o clique com descrição humanizada imediatamente
+    addStep(type, desc);
 
-    // Se "auto em todo botão/link" ligado, captura após a UI atualizar
+    // FIX #2 + #3: captura auto enfileirada — print APÓS o clique, em ordem
     if (autoShotBtn) {
-      autoCapture('print_auto', '📷 ' + desc, 900);
+      enqueueCapture('print_auto', '📷 Após clique — ' + humanShort(desc), 900);
     }
   }
 
-  // Sobe até 7 níveis procurando elemento clicável
   function findClickable(el) {
     let cur = el;
     for (let i = 0; i < 7; i++) {
@@ -584,70 +785,57 @@
     const tag  = el.tagName.toLowerCase();
     const role = (el.getAttribute('role') || '').toLowerCase();
     const type = (el.type || '').toLowerCase();
-
-    // Elementos nativamente clicáveis
     if (['button', 'a'].includes(tag)) return true;
     if (tag === 'input' && ['submit','button','reset','checkbox','radio'].includes(type)) return true;
     if (tag === 'select') return true;
-
-    // Elementos com roles ARIA clicáveis
     if (['button','link','tab','menuitem','treeitem','option','checkbox','radio','switch'].includes(role)) return true;
-
-    // Elemento com handler onclick explícito (comum em eProc: divs, tds, imgs com onclick)
     if (el.hasAttribute('onclick')) return true;
-
-    // Verificar cursor:pointer como último recurso (só se tiver texto/conteúdo)
     try {
       const style = window.getComputedStyle(el);
       if (style.cursor === 'pointer' && (el.textContent || '').trim()) return true;
     } catch {}
-
     return false;
   }
 
-  // ── CHANGE (select, checkbox, radio)
+  // ── CHANGE
   function onChange(e) {
     if (!recording) return;
     const el = e.target;
     if (!el || el.closest('#eprec')) return;
     const tag  = el.tagName.toLowerCase();
     const type = (el.type || '').toLowerCase();
-
     if (tag === 'select') {
       const lbl = findLabel(el) || el.name || el.id || 'campo';
       const val = el.options[el.selectedIndex]?.text || el.value;
-      setTimeout(() => addStep('select', `Seleção: "${lbl}" → "${val}"`), 0);
+      addStep('select', `Seleção no campo "${lbl}": opção escolhida foi "${val}"`);
     }
     if (tag === 'input' && ['checkbox','radio'].includes(type)) {
       const lbl = findLabel(el) || el.name || el.id || el.value || 'opção';
       const desc = type === 'checkbox'
-        ? `Checkbox ${el.checked ? '✓ marcado' : '✗ desmarcado'}: "${lbl}"`
-        : `Rádio selecionado: "${lbl}"`;
-      setTimeout(() => addStep('select', desc), 0);
+        ? `Checkbox "${lbl}" foi ${el.checked ? 'marcado ✓' : 'desmarcado ✗'}`
+        : `Opção de rádio selecionada: "${lbl}"`;
+      addStep('select', desc);
     }
   }
 
-  // ── BLUR (captura campos de texto quando o usuário sai do campo)
-  const blurTrack = new WeakMap(); // el → último valor registrado
+  // ── BLUR — FIX #1: descrição mais natural
+  const blurTrack = new WeakMap();
   function onBlur(e) {
     if (!recording) return;
     const el = e.target;
     if (!el || el.closest('#eprec') || el.closest('#eprec-modal')) return;
-
     const tag  = el.tagName.toLowerCase();
     const type = (el.type || '').toLowerCase();
     const skip = ['submit','button','reset','checkbox','radio','hidden','file','image'];
     if (tag === 'input' && skip.includes(type)) return;
     if (tag !== 'input' && tag !== 'textarea') return;
-
     const val = (el.value || '').trim();
     if (!val) return;
-    if (blurTrack.get(el) === val) return; // mesmo valor já registrado
+    if (blurTrack.get(el) === val) return;
     blurTrack.set(el, val);
-
     const lbl   = findLabel(el) || el.placeholder || el.getAttribute('aria-label') || el.name || el.id || 'campo';
-    const shown = type === 'password' ? '(senha)' : val.length > 70 ? val.substring(0, 70) + '…' : val;
-    setTimeout(() => addStep('input', `Campo "${lbl}": "${shown}"`), 0);
+    const shown = type === 'password' ? '(senha ocultada)' : val.length > 70 ? val.substring(0, 70) + '…' : val;
+    addStep('input', `Campo "${lbl}" preenchido com "${shown}"`);
   }
 
   // ── SUBMIT
@@ -657,15 +845,16 @@
     if (form.closest('#eprec')) return;
     const id = form.id || form.name || (form.action || '').split('/').pop() || 'formulário';
     if (autoShot) {
-      // Captura após 1.2s para dar tempo da resposta aparecer
-      autoCapture('print_auto', `📷 Print automático após envio: "${id}"`, 1200);
+      // FIX #3: enfileirado — vai aparecer após o passo de submit
+      addStep('submit', `Formulário "${id}" enviado — aguardando resposta do sistema`);
+      enqueueCapture('print_auto', `📷 Resultado do envio do formulário "${id}"`, 1400);
     } else {
-      setTimeout(() => addStep('submit', `Formulário enviado: "${id}"`), 0);
+      addStep('submit', `Formulário "${id}" enviado`);
     }
   }
 
   // ────────────────────────────────────────────────
-  //  DESCREVER ELEMENTO
+  //  DESCREVER ELEMENTO — FIX #1: textos humanizados
   // ────────────────────────────────────────────────
   function descEl(el) {
     if (!el) return 'Elemento';
@@ -677,44 +866,44 @@
     const name  = aria || lbl || title || txt || el.getAttribute('value') || el.name || el.id || tag;
 
     if (tag === 'button' || (el.getAttribute('role') || '') === 'button') {
-      return `Botão clicado: "${name}"`;
+      return `Botão "${name}" acionado`;
     }
     if (tag === 'a') {
       const href = el.getAttribute('href') || '';
       const extra = extractEprocAction(href);
-      return `Link clicado: "${name}"${extra ? ' (' + extra + ')' : ''}`;
+      return `Link "${name}" acessado${extra ? ' — ' + extra : ''}`;
     }
     if (tag === 'input') {
       const t = (el.type || '').toLowerCase();
-      if (['submit','button'].includes(t)) return `Botão clicado: "${name}"`;
-      if (t === 'checkbox') return `Checkbox ${el.checked ? '✓ marcado' : '✗ desmarcado'}: "${name}"`;
-      if (t === 'radio')    return `Rádio selecionado: "${name}"`;
+      if (['submit','button'].includes(t)) return `Botão "${name}" acionado`;
+      if (t === 'checkbox') return `Checkbox "${name}" ${el.checked ? 'marcado ✓' : 'desmarcado ✗'}`;
+      if (t === 'radio')    return `Opção "${name}" selecionada`;
     }
-    if (tag === 'select') return `Menu suspenso clicado: "${name}"`;
-    // Elemento genérico com onclick (comum no eProc: divs, tds)
-    return `Clique em: "${name}" (${tag})`;
+    if (tag === 'select') return `Menu "${name}" aberto`;
+    return `Elemento "${name}" (${tag}) clicado`;
   }
 
-  // Extrai a ação do eProc da URL para deixar o log mais descritivo
+  function humanShort(desc) {
+    // Retorna versão curta para legenda do print automático
+    return desc.replace(/^(Botão|Link|Opção|Elemento)\s+/, '').substring(0, 60);
+  }
+
   function extractEprocAction(href) {
     if (!href) return '';
     const m = href.match(/[?&]acao=([^&]+)/i);
     if (m) return 'ação: ' + decodeURIComponent(m[1]).replace(/_/g, ' ');
-    // Fallback: último segmento da URL
     const seg = href.split('/').filter(Boolean).pop() || '';
     if (seg && seg !== '#' && seg.length < 60) return seg;
     return '';
   }
 
   function findLabel(el) {
-    // 1. label[for=id]
     if (el.id) {
       try {
         const l = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
         if (l) return l.textContent.trim();
       } catch {}
     }
-    // 2. label ancestral
     const parentLabel = el.closest('label');
     if (parentLabel) {
       const clone = parentLabel.cloneNode(true);
@@ -726,67 +915,138 @@
   }
 
   // ────────────────────────────────────────────────
-  //  OBSERVER DE POPUPS
+  //  OBSERVER DE POPUPS — FIX #4
+  //  Telas sobrepostas: grava como sequência contínua,
+  //  não interrompe nem reinicia a gravação.
   // ────────────────────────────────────────────────
+  const knownPopups = new WeakSet(); // evita duplicatas do mesmo nó
+
   function observePopups() {
     if (popObs) return;
     popObs = new MutationObserver(muts => {
       if (!recording) return;
       for (const m of muts) {
+        // FIX #4: detecta abertura de popups
         for (const node of m.addedNodes) {
           if (node.nodeType !== 1) continue;
-          if (node.id && ['eprec','eprec-modal','eprec-floatind'].includes(node.id)) continue;
+          if (node.id && ['eprec','eprec-modal','eprec-floatind','eprec-capturing','eprec-hist-modal'].includes(node.id)) continue;
+          if (knownPopups.has(node)) continue;
           if (isPopup(node)) {
+            knownPopups.add(node);
             const desc = descPopup(node);
+            // FIX #4: registra como passo na sequência principal (não relatório separado)
+            addStep('popup_aberto', `Janela/popup exibido: ${desc}`);
             if (autoShot) {
-              // Captura após 600ms para o popup terminar de renderizar
-              autoCapture('print_auto', '📷 Print automático — Popup aberto: ' + desc, 600);
-            } else {
-              setTimeout(() => addStep('popup_aberto', 'Popup aberto: ' + desc), 0);
+              // Captura o popup como parte da sequência normal
+              enqueueCapture('print_auto', `📷 Conteúdo do popup: ${desc}`, 500);
             }
+            // Observa fechamento do popup para registrar também
+            observePopupClose(node, desc);
+          }
+        }
+        // FIX #4: detecta mudanças de visibilidade em popups já existentes
+        if (m.type === 'attributes' && m.target.nodeType === 1) {
+          const node = m.target;
+          if (!knownPopups.has(node) && isPopupVisible(node)) {
+            knownPopups.add(node);
+            const desc = descPopup(node);
+            addStep('popup_aberto', `Janela/popup exibido: ${desc}`);
+            if (autoShot) {
+              enqueueCapture('print_auto', `📷 Conteúdo do popup: ${desc}`, 500);
+            }
+            observePopupClose(node, desc);
           }
         }
       }
     });
-    popObs.observe(document.body, { childList: true, subtree: false });
+    popObs.observe(document.body, {
+      childList: true,
+      subtree: true,          // FIX #4: subtree=true para detectar popups em camadas internas
+      attributes: true,
+      attributeFilter: ['style','class','hidden','aria-hidden'],
+    });
+  }
+
+  function observePopupClose(node, desc) {
+    // Observa quando o popup for removido ou escondido
+    const obs = new MutationObserver(() => {
+      if (!document.body.contains(node) || !isPopupVisible(node)) {
+        obs.disconnect();
+        if (recording) {
+          addStep('popup_fechado', `Janela/popup fechado: ${desc}`);
+        }
+      }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+    // Também observa atributos no próprio nó
+    obs.observe(node, { attributes: true, attributeFilter: ['style','class','hidden','aria-hidden'] });
   }
 
   function isPopup(el) {
     const role = (el.getAttribute('role') || '').toLowerCase();
     if (['dialog','alertdialog','alert'].includes(role)) return true;
     const cls = typeof el.className === 'string' ? el.className : '';
-    return /modal|popup|dialog|overlay|lightbox|popover/i.test(cls);
+    if (/modal|popup|dialog|overlay|lightbox|popover/i.test(cls)) return true;
+    // eProc usa divs com z-index altíssimo como popups
+    try {
+      const s = window.getComputedStyle(el);
+      const z = parseInt(s.zIndex, 10);
+      if (!isNaN(z) && z > 999 && s.position !== 'static' && isPopupVisible(el)) return true;
+    } catch {}
+    return false;
+  }
+
+  function isPopupVisible(el) {
+    try {
+      const s = window.getComputedStyle(el);
+      return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    } catch { return false; }
   }
 
   function descPopup(el) {
-    const h = el.querySelector('h1,h2,h3,h4,[class*="title"],[class*="titulo"]');
-    const t = h ? h.textContent.trim() : (el.textContent || '').trim().substring(0, 80);
-    return `"${t.replace(/\s+/g, ' ')}"`;
+    // FIX #1: captura título de alertas e mensagens do eProc de forma mais precisa
+    const selectors = [
+      '[class*="titulo"]', '[class*="title"]', '[class*="header"]',
+      '[class*="cabecalho"]', '[class*="alerta"]', '[class*="mensagem"]',
+      'h1','h2','h3','h4','.modal-title','.dialog-title',
+    ];
+    for (const sel of selectors) {
+      try {
+        const h = el.querySelector(sel);
+        if (h) {
+          const t = h.textContent.trim();
+          if (t) return `"${t.replace(/\s+/g, ' ').substring(0, 100)}"`;
+        }
+      } catch {}
+    }
+    // Fallback: primeiros 100 chars do texto
+    const t = (el.textContent || '').trim().replace(/\s+/g, ' ').substring(0, 100);
+    return `"${t || 'sem título'}"`;
   }
 
   // ────────────────────────────────────────────────
-  //  RETOMAR SE ESTAVA GRAVANDO (nova página carregou)
+  //  RETOMAR SE ESTAVA GRAVANDO
   // ────────────────────────────────────────────────
   function resumeIfNeeded() {
     if (recording) {
       attachListeners();
       observePopups();
       if (autoShot) {
-        // Captura a nova página após ela carregar
-        autoCapture('print_auto', '📷 Print automático — Nova página: ' + document.title, 800);
+        enqueueCapture('print_auto', '📷 Nova página carregada: ' + document.title, 800);
       } else {
-        setTimeout(() => addStep('navegacao', 'Nova página: ' + document.title), 300);
+        addStep('navegacao', 'Nova página: ' + document.title);
       }
     }
   }
 
   // ────────────────────────────────────────────────
-  //  NARRATIVA — converte passos em texto fluido
+  //  NARRATIVA — FIX #1: texto mais humanizado e contextual
   // ────────────────────────────────────────────────
-  function generateNarrative(steps) {
+  function generateNarrative(stepsArr) {
     const CONN = [
-      'Em seguida,', 'Então,', 'A seguir,', 'Após isso,',
-      'Na sequência,', 'Depois disso,', 'Por sua vez,', 'Logo após,',
+      'Em seguida,', 'Depois,', 'A seguir,', 'Após isso,',
+      'Na sequência,', 'Então,', 'Logo após,', 'Por fim,',
+      'Em continuidade,', 'Ato contínuo,',
     ];
     let ci = 0;
     const conn = () => CONN[ci++ % CONN.length];
@@ -794,32 +1054,34 @@
     const parts = [];
     let lastPage = null;
 
-    for (const s of steps) {
-      // Transição de página
-      if (s.pageTitle && s.pageTitle !== lastPage && !['inicio', 'print_auto', 'print_manual'].includes(s.type)) {
-        if (lastPage === null) {
-          parts.push(`O usuário acessa a página <strong>"${esc(s.pageTitle)}"</strong>.`);
-        } else {
-          parts.push(`${conn()} navega para a página <strong>"${esc(s.pageTitle)}"</strong>.`);
-        }
-        lastPage = s.pageTitle;
-      }
-
+    for (const s of stepsArr) {
       if (s.type === 'inicio') {
         const title = s.description.replace('Gravação iniciada — ', '').trim();
         lastPage = s.pageTitle;
-        if (!parts.length) parts.push(`O usuário inicia o teste na página <strong>"${esc(title)}"</strong>.`);
+        parts.push(`O teste tem início na página <strong>"${esc(title)}"</strong>.`);
         continue;
+      }
+
+      // Transição de página
+      if (s.pageTitle && s.pageTitle !== lastPage && !['print_auto','print_manual','popup_aberto','popup_fechado'].includes(s.type)) {
+        parts.push(`${conn()} o sistema navega para a página <strong>"${esc(s.pageTitle)}"</strong>.`);
+        lastPage = s.pageTitle;
       }
 
       const sentence = stepToNarrative(s);
       if (!sentence) continue;
 
-      // Primeiro item narrativo real
       if (parts.length === 0) {
         parts.push(`O usuário ${sentence}.`);
       } else {
-        parts.push(`${conn()} ${sentence}.`);
+        // Prints e notas integrados sem conectivo
+        if (['print_auto','print_manual'].includes(s.type)) {
+          parts.push(sentence + '.');
+        } else if (s.type === 'anotacao') {
+          parts.push(`<em style="color:#718096">[Observação registrada: ${esc(s.description)}]</em>`);
+        } else {
+          parts.push(`${conn()} o usuário ${sentence}.`);
+        }
       }
     }
 
@@ -832,56 +1094,65 @@
     switch (s.type) {
       case 'inicio':
       case 'navegacao':
-      case 'print_auto':
-      case 'print_manual':
         return null;
 
+      case 'print_auto':
+        return `<span style="color:#4a5568;font-style:italic">📷 ${esc(d.replace(/^📷\s*/, ''))}</span>`;
+
+      case 'print_manual':
+        return `<span style="color:#4a5568;font-style:italic">📷 ${esc(d.replace(/^📷\s*/, ''))}</span>`;
+
       case 'clique_botao': {
-        const m = d.match(/Botão clicado: "(.+)"/);
-        return `clica no botão <strong>"${esc(m ? m[1] : d)}"</strong>`;
+        const m = d.match(/Botão "(.+)" acionado/);
+        return `aciona o botão <strong>"${esc(m ? m[1] : d)}"</strong>`;
       }
 
       case 'clique_link': {
-        const m = d.match(/Link clicado: "([^"]+)"/);
-        const act = d.match(/\(ação: ([^)]+)\)/);
+        const m = d.match(/Link "([^"]+)" acessado/);
+        const act = d.match(/— (.+)$/);
         const name = esc(m ? m[1] : d);
         return `clica no link <strong>"${name}"</strong>${act ? ` (${esc(act[1])})` : ''}`;
       }
 
       case 'clique_menu': {
-        const m = d.match(/Clique em: "([^"]+)"/);
-        return `seleciona a opção <strong>"${esc(m ? m[1] : d)}"</strong>`;
+        const m = d.match(/Elemento "([^"]+)"/);
+        return `seleciona a opção <strong>"${esc(m ? m[1] : d)}"</strong> no menu`;
       }
 
       case 'input': {
-        const m = d.match(/Campo "([^"]+)": "(.+)"/);
+        const m = d.match(/Campo "([^"]+)" preenchido com "(.+)"/);
         if (!m) return `preenche um campo de formulário`;
-        const val = m[2] === '(senha)' ? '<em>(senha omitida)</em>' : `<em>"${esc(m[2])}"</em>`;
+        const val = m[2].includes('(senha') ? '<em>senha ocultada</em>' : `<em>"${esc(m[2])}"</em>`;
         return `preenche o campo <strong>"${esc(m[1])}"</strong> com ${val}`;
       }
 
       case 'select': {
-        const mSel = d.match(/Seleção: "([^"]+)" → "([^"]+)"/);
-        if (mSel) return `seleciona <strong>"${esc(mSel[2])}"</strong> no campo <strong>"${esc(mSel[1])}"</strong>`;
-        const mCb = d.match(/Checkbox (✓ marcado|✗ desmarcado): "([^"]+)"/);
-        if (mCb) return `${mCb[1] === '✓ marcado' ? 'marca' : 'desmarca'} a opção <strong>"${esc(mCb[2])}"</strong>`;
-        const mRd = d.match(/Rádio selecionado: "([^"]+)"/);
+        const mSel = d.match(/Seleção no campo "([^"]+)": opção escolhida foi "([^"]+)"/);
+        if (mSel) return `seleciona a opção <strong>"${esc(mSel[2])}"</strong> no campo <strong>"${esc(mSel[1])}"</strong>`;
+        const mCb = d.match(/Checkbox "([^"]+)" foi (marcado|desmarcado)/);
+        if (mCb) return `${mCb[2] === 'marcado' ? 'marca' : 'desmarca'} a opção <strong>"${esc(mCb[1])}"</strong>`;
+        const mRd = d.match(/Opção de rádio selecionada: "([^"]+)"/);
         if (mRd) return `seleciona a opção <strong>"${esc(mRd[1])}"</strong>`;
         return esc(d);
       }
 
       case 'submit': {
-        const m = d.match(/Formulário enviado: "([^"]+)"/);
+        const m = d.match(/Formulário "([^"]+)" enviado/);
         return m ? `submete o formulário <strong>"${esc(m[1])}"</strong>` : `submete o formulário`;
       }
 
       case 'popup_aberto': {
-        const m = d.match(/Popup aberto: "([^"]+)"/);
-        return m ? `um popup é exibido: <strong>"${esc(m[1])}"</strong>` : `um popup é exibido na tela`;
+        const m = d.match(/Janela\/popup exibido: "([^"]+)"/);
+        return m ? `uma janela é exibida pelo sistema: <strong>"${esc(m[1])}"</strong>` : `uma janela é exibida pelo sistema`;
+      }
+
+      case 'popup_fechado': {
+        const m = d.match(/Janela\/popup fechado: "([^"]+)"/);
+        return m ? `a janela <strong>"${esc(m[1])}"</strong> é fechada` : `a janela é fechada`;
       }
 
       case 'anotacao':
-        return `<span style="color:#718096">[Observação: ${esc(d)}]</span>`;
+        return null; // tratado acima
 
       default:
         return null;
@@ -889,20 +1160,34 @@
   }
 
   // ────────────────────────────────────────────────
-  //  EXPORTAR — relatório HTML com prints embutidos
+  //  EXPORTAR
   // ────────────────────────────────────────────────
-  function exportReport() {
-    if (!steps.length) { alert('Nenhum passo gravado.'); return; }
+  function pickExportTarget() {
+    // Se há apenas a sessão atual, exporta direto. Se há histórico, oferece escolha.
+    exportSession({ steps, shots: buildCurrentShotsMap(), date: new Date().toLocaleString('pt-BR'), title: steps[0]?.pageTitle });
+  }
 
-    const now = new Date();
-    const dBR = now.toLocaleDateString('pt-BR');
-    const tBR = now.toLocaleTimeString('pt-BR');
+  function buildCurrentShotsMap() {
+    const map = {};
+    steps.forEach(s => { const img = getShot(s.num); if (img) map[s.num] = img; });
+    return map;
+  }
+
+  function exportSession(sess) {
+    const stepsArr = sess.steps || [];
+    const shotsMap  = sess.shots || {};
+    if (!stepsArr.length) { alert('Nenhum passo para exportar.'); return; }
+
+    const now  = new Date();
+    const dBR  = sess.date ? sess.date.split(' ')[0] : now.toLocaleDateString('pt-BR');
+    const tBR  = sess.date ? (sess.date.split(' ')[1] || '') : now.toLocaleTimeString('pt-BR');
 
     const BADGE = {
       clique_botao: ['#1a365d','#90cdf4','BOTÃO'],
       clique_link:  ['#322659','#d6bcfa','LINK'],
       clique_menu:  ['#1d4044','#81e6d9','MENU'],
       popup_aberto: ['#744210','#fbd38d','POPUP'],
+      popup_fechado:['#2d3748','#a0aec0','POPUP FIM'],
       anotacao:     ['#1c4532','#9ae6b4','NOTA'],
       submit:       ['#63171b','#feb2b2','ENVIO'],
       inicio:       ['#171923','#a0aec0','INÍCIO'],
@@ -913,9 +1198,13 @@
       navegacao:    ['#322659','#e9d8fd','NAVEGAÇÃO'],
     };
 
-    const rows = steps.map(s => {
+    // FIX #3: Ordena por tsNum para garantir ordem cronológica exata no relatório
+    const sorted = [...stepsArr].sort((a, b) => (a.tsNum || 0) - (b.tsNum || 0));
+
+    const rows = sorted.map(s => {
       const [bg, fg, lbl] = BADGE[s.type] || ['#2d3748','#e2e8f0', s.type.toUpperCase()];
-      const shotData = getShot(s.num);
+      const shotData = shotsMap[s.num];
+      // FIX #2 + #3: print inserido imediatamente após a linha do passo correspondente
       const img = shotData
         ? `<div style="margin-top:8px"><img src="${shotData}" style="max-width:700px;width:100%;border-radius:4px;border:1px solid #e2e8f0;display:block"></div>`
         : '';
@@ -928,8 +1217,8 @@
       </tr>`;
     }).join('');
 
-    const printCount = steps.filter(s => getShot(s.num)).length;
-    const narrative = generateNarrative(steps);
+    const printCount = sorted.filter(s => shotsMap[s.num]).length;
+    const narrative = generateNarrative(sorted);
 
     const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
 <title>Relatório de Testes eProc — ${dBR}</title>
@@ -941,7 +1230,7 @@ h2{margin:0 0 10px;font-size:14px;font-weight:700;color:#2d3748}
 .hdr{background:#1a202c;border-radius:8px;padding:20px 24px;margin-bottom:18px}
 .meta{font-size:11px;color:#718096;display:flex;gap:18px;flex-wrap:wrap;margin-top:8px}
 .narr{background:#fff;border-radius:8px;padding:18px 24px;margin-bottom:18px;box-shadow:0 1px 4px rgba(0,0,0,.08);border-left:4px solid #553c9a}
-.narr-text{font-size:13px;color:#4a5568;line-height:2;margin:0}
+.narr-text{font-size:13px;color:#4a5568;line-height:2.1;margin:0}
 .narr-text strong{color:#1a202c}
 table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 th{background:#2d3748;color:#a0aec0;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:8px 10px;text-align:left}
@@ -959,17 +1248,16 @@ tr:hover td{background:#f7fafc}
   .badge{-webkit-print-color-adjust:exact;print-color-adjust:exact}
   img{max-width:100% !important;page-break-inside:avoid}
   tr{page-break-inside:avoid}
-  .narr{page-break-inside:avoid}
 }
 </style></head><body>
 <div class="hdr">
   <h1>📋 Relatório de Testes — eProc</h1>
-  <p style="margin:4px 0 0;color:#718096;font-size:12px">Gravador de Testes para Homologação v4.3</p>
+  <p style="margin:4px 0 0;color:#718096;font-size:12px">Gravador de Testes para Homologação v5.0</p>
   <div class="meta">
-    <span>📅 ${dBR} às ${tBR}</span>
-    <span>📌 ${steps.length} passos registrados</span>
-    ${printCount > 0 ? `<span>📷 ${printCount} print${printCount!==1?'s':''} capturado${printCount!==1?'s':''}</span>` : ''}
-    <span>🌐 ${esc(steps[0]?.pageTitle||'')}</span>
+    <span>📅 ${dBR} ${tBR}</span>
+    <span>📌 ${sorted.length} passos registrados</span>
+    ${printCount > 0 ? `<span>📷 ${printCount} print${printCount !== 1 ? 's' : ''}</span>` : ''}
+    <span>🌐 ${esc(sorted[0]?.pageTitle || '')}</span>
   </div>
 </div>
 <div class="narr">
@@ -986,25 +1274,25 @@ tr:hover td{background:#f7fafc}
   </tr></thead>
   <tbody>${rows}</tbody>
 </table>
-<p style="text-align:center;color:#cbd5e0;font-size:10px;margin-top:16px">eProc Gravador de Testes v4.0 — ${dBR} ${tBR}</p>
+<p style="text-align:center;color:#cbd5e0;font-size:10px;margin-top:16px">eProc Gravador de Testes v5.0 — ${dBR} ${tBR}</p>
 </body></html>`;
 
     const a = Object.assign(document.createElement('a'), {
-      href: URL.createObjectURL(new Blob([html], {type: 'text/html;charset=utf-8'})),
+      href: URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' })),
       download: `relatorio-eproc-${now.toISOString().slice(0, 10)}.html`
     });
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
   }
 
   function esc(s) {
-    return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
   // ────────────────────────────────────────────────
   //  INIT
   // ────────────────────────────────────────────────
   function init() {
-    loadShotsFromStorage(); // recupera screenshots de navegações anteriores
+    loadShotsFromStorage();
     const run = () => { buildPanel(); buildModal(); resumeIfNeeded(); };
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', run);
