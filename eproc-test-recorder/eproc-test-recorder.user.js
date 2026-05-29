@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eProc - Gravador de Testes para Homologação
 // @namespace    eproc-gravador-testes
-// @version      6.0.0
+// @version      6.1.0
 // @description  Registra ações do usuário, captura viewport e gera relatório sequencial
 // @author       Gerado via Claude
 // @include      *://eproc*.tjsp.jus.br/*
@@ -449,7 +449,7 @@
     ss(SK.rec, true); ss(SK.steps, []); ss(SK.count, 0);
     clearShots();
     attachListeners(); observePopups();
-    addStep('inicio', 'Gravação iniciada — ' + document.title);
+    addStep('inicio', `Início do registro na página "${document.title}"`);
     refreshUI();
   }
 
@@ -578,30 +578,48 @@
     }
     const IGNORE = new Set(['eprec', 'eprec-floatind', 'eprec-modal', 'eprec-capturing', 'eprec-hist-modal']);
 
-    // Dimensões e posição do viewport atual
+    // Posição e dimensões do viewport NO MOMENTO da captura
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    const sx = window.scrollX;
-    const sy = window.scrollY;
+    const sx = Math.round(window.scrollX);
+    const sy = Math.round(window.scrollY);
 
     try {
-      const canvas = await html2canvas(document.body, {
-        // Captura APENAS a área visível: x/y = scroll atual, width/height = viewport
-        x:      sx,
-        y:      sy,
-        width:  vw,
-        height: vh,
-        windowWidth:  document.documentElement.scrollWidth,
-        windowHeight: document.documentElement.scrollHeight,
-        scale:  0.8,          // um pouco mais nítido pois a área é menor
+      // Renderiza a página completa (html2canvas ignora scrollX/Y nos parâmetros x/y
+      // quando o target é document.body — a única forma confiável de recortar o viewport
+      // é renderizar tudo e depois cortar o canvas resultante na posição do scroll).
+      const full = await html2canvas(document.body, {
+        scale:         0.8,
         useCORS:       true,
         allowTaint:    true,
         logging:       false,
         removeContainer: true,
         imageTimeout:  6000,
+        // Informa ao html2canvas qual é o tamanho da janela para posicionamento de
+        // elementos fixed/sticky — sem isso o scroll é ignorado.
+        windowWidth:   vw,
+        windowHeight:  vh,
+        scrollX:       -sx,   // deslocamento negativo = html2canvas começa do ponto certo
+        scrollY:       -sy,
         ignoreElements: el => IGNORE.has(el.id),
       });
-      return canvas.toDataURL('image/jpeg', 0.82);
+
+      // Recorta do canvas completo apenas a fatia correspondente ao viewport.
+      // A escala 0.8 é aplicada ao canvas inteiro, então os pixels do scroll
+      // precisam ser multiplicados pela mesma escala.
+      const scale  = 0.8;
+      const cropX  = Math.round(sx * scale);
+      const cropY  = Math.round(sy * scale);
+      const cropW  = Math.min(Math.round(vw * scale), full.width  - cropX);
+      const cropH  = Math.min(Math.round(vh * scale), full.height - cropY);
+
+      if (cropW <= 0 || cropH <= 0) return full.toDataURL('image/jpeg', 0.82);
+
+      const out = document.createElement('canvas');
+      out.width  = cropW;
+      out.height = cropH;
+      out.getContext('2d').drawImage(full, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+      return out.toDataURL('image/jpeg', 0.82);
     } catch (err) {
       console.warn('[eprec] captureViewport falhou:', err.message);
       return null;
@@ -701,13 +719,13 @@
       const val = el.options[el.selectedIndex]?.text || el.value;
       const key = `sel:${lbl}:${val}`;
       if (!isDuplicate(key))
-        addStep('select', `Campo "${lbl}": selecionou "${val}"`);
+        addStep('select', `Ao selecionar "${val}" no campo "${lbl}"`);
     }
     if (tag === 'input' && ['checkbox','radio'].includes(type)) {
       const lbl  = findLabel(el) || el.name || el.id || el.value || 'opção';
       const desc = type === 'checkbox'
-        ? `Opção "${lbl}" ${el.checked ? 'marcada ✓' : 'desmarcada ✗'}`
-        : `Opção "${lbl}" selecionada`;
+        ? `Ao ${el.checked ? 'marcar' : 'desmarcar'} a opção "${lbl}"`
+        : `Ao selecionar a opção "${lbl}"`;
       if (!isDuplicate(desc)) addStep('select', desc);
     }
   }
@@ -728,7 +746,7 @@
     blurTrack.set(el, val);
     const lbl   = findLabel(el) || el.placeholder || el.getAttribute('aria-label') || el.name || el.id || 'campo';
     const shown = type === 'password' ? '(senha)' : val.length > 70 ? val.substring(0, 70) + '…' : val;
-    addStep('input', `Campo "${lbl}" preenchido: "${shown}"`);
+    addStep('input', `Ao preencher o campo "${lbl}" com "${shown}"`);
   }
 
   // ── SUBMIT
@@ -737,9 +755,9 @@
     const form = e.target;
     if (form.closest('#eprec')) return;
     const id = form.id || form.name || (form.action || '').split('/').pop() || 'formulário';
-    addStep('submit', `Formulário "${id}" enviado`);
+    addStep('submit', `Ao enviar o formulário "${id}"`);
     if (autoShot) {
-      enqueueCapture('print_auto', `Resultado: formulário "${id}"`, 1400);
+      enqueueCapture('print_auto', `Resultado após envio do formulário "${id}"`, 1400);
     }
   }
 
@@ -756,20 +774,20 @@
     const name  = aria || lbl || title || txt || el.getAttribute('value') || el.name || el.id || tag;
 
     if (tag === 'button' || (el.getAttribute('role') || '') === 'button')
-      return `Clicou em "${name}"`;
+      return `Ao acionar o botão "${name}"`;
     if (tag === 'a') {
       const href  = el.getAttribute('href') || '';
       const extra = extractEprocAction(href);
-      return `Acessou "${name}"${extra ? ' (' + extra + ')' : ''}`;
+      return `Ao clicar no link "${name}"${extra ? ' (' + extra + ')' : ''}`;
     }
     if (tag === 'input') {
       const t = (el.type || '').toLowerCase();
-      if (['submit','button'].includes(t)) return `Clicou em "${name}"`;
-      if (t === 'checkbox') return `${el.checked ? 'Marcou' : 'Desmarcou'} "${name}"`;
-      if (t === 'radio')    return `Selecionou "${name}"`;
+      if (['submit','button'].includes(t)) return `Ao acionar o botão "${name}"`;
+      if (t === 'checkbox') return `Ao ${el.checked ? 'marcar' : 'desmarcar'} a opção "${name}"`;
+      if (t === 'radio')    return `Ao selecionar a opção "${name}"`;
     }
-    if (tag === 'select') return `Abriu menu "${name}"`;
-    return `Clicou em "${name}"`;
+    if (tag === 'select') return `Ao abrir o menu "${name}"`;
+    return `Ao clicar em "${name}"`;
   }
 
   function extractEprocAction(href) {
@@ -809,22 +827,25 @@
         for (const node of m.addedNodes) {
           if (node.nodeType !== 1) continue;
           if (node.id && ['eprec','eprec-modal','eprec-floatind','eprec-capturing','eprec-hist-modal'].includes(node.id)) continue;
+          try { if (node.closest('#eprec,#eprec-modal,#eprec-capturing,#eprec-hist-modal,#eprec-floatind')) continue; } catch {}
           if (knownPopups.has(node)) continue;
           if (isPopup(node)) {
             knownPopups.add(node);
             const desc = descPopup(node);
-            addStep('popup_aberto', `Janela exibida: ${desc}`);
-            if (autoShot) enqueueCapture('print_auto', `Janela: ${desc}`, 500);
+            addStep('popup_aberto', `O sistema exibe a janela ${desc}`);
+            if (autoShot) enqueueCapture('print_auto', `Conteúdo da janela ${desc}`, 500);
             observePopupClose(node, desc);
           }
         }
         if (m.type === 'attributes' && m.target.nodeType === 1) {
           const node = m.target;
+          if (['eprec','eprec-modal','eprec-floatind','eprec-capturing','eprec-hist-modal'].includes(node.id)) continue;
+          try { if (node.closest('#eprec,#eprec-modal,#eprec-capturing,#eprec-hist-modal,#eprec-floatind')) continue; } catch {}
           if (!knownPopups.has(node) && isPopup(node) && isPopupVisible(node)) {
             knownPopups.add(node);
             const desc = descPopup(node);
-            addStep('popup_aberto', `Janela exibida: ${desc}`);
-            if (autoShot) enqueueCapture('print_auto', `Janela: ${desc}`, 500);
+            addStep('popup_aberto', `O sistema exibe a janela ${desc}`);
+            if (autoShot) enqueueCapture('print_auto', `Conteúdo da janela ${desc}`, 500);
             observePopupClose(node, desc);
           }
         }
@@ -840,7 +861,7 @@
     const obs = new MutationObserver(() => {
       if (!document.body.contains(node) || !isPopupVisible(node)) {
         obs.disconnect();
-        if (recording) addStep('popup_fechado', `Janela fechada: ${desc}`);
+        if (recording) addStep('popup_fechado', `A janela ${desc} foi fechada`);
       }
     });
     obs.observe(document.body, { childList: true, subtree: true });
@@ -887,7 +908,7 @@
     if (autoShot) {
       enqueueCapture('print_auto', `Nova página: ${document.title}`, 800);
     } else {
-      addStep('navegacao', `Nova página: ${document.title}`);
+      addStep('navegacao', `Navegação para a página "${document.title}"`);
     }
   }
 
@@ -1030,7 +1051,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f4f8;color:#2d3748;ma
 <div class="content">
 <div class="hdr">
   <h1>📋 Relatório de Testes — eProc</h1>
-  <p>Gravador de Testes para Homologação v6.0</p>
+  <p>Gravador de Testes para Homologação v6.1</p>
   <div class="meta">
     <span>📅 ${dBR} ${tBR}</span>
     <span>📌 ${total} passos</span>
@@ -1040,7 +1061,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f4f8;color:#2d3748;ma
 </div>
 ${blocks}
 <p style="text-align:center;color:#a0aec0;font-size:10px;margin-top:20px">
-  eProc Gravador v6.0 — gerado em ${dBR} ${tBR}
+  eProc Gravador v6.1 — gerado em ${dBR} ${tBR}
 </p>
 </div>
 </body></html>`;
