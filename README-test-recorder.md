@@ -2,27 +2,31 @@
 
 Userscript para **registrar ações no eProc** durante testes de homologação de novas funcionalidades. Gera um relatório HTML completo com todos os passos executados e prints de tela embutidos.
 
+**Versão atual:** 4.3.0
+
 ---
 
 ## Instalação
 
-1. Instale a extensão [Tampermonkey](https://www.tampermonkey.net/) no Chrome/Edge/Firefox
+1. Instale a extensão [Tampermonkey](https://www.tampermonkey.net/) no Chrome, Edge ou Firefox
 2. Clique no link abaixo para instalar diretamente:
 
-**[⬇ Instalar script](https://raw.githubusercontent.com/rsalvessap/eproc-tools/main/eproc-test-recorder/eproc-test-recorder.user.js)**
+👉 [Instalar script](https://raw.githubusercontent.com/rsalvessap/eproc-tools/main/eproc-test-recorder.user.js)
 
 > O Tampermonkey detecta o arquivo `.user.js` automaticamente e abre a tela de instalação.
 
-> **Requisito:** O Tampermonkey precisa de permissão para acessar `cdnjs.cloudflare.com` (onde a biblioteca de captura de tela é carregada). Se o ambiente bloquear esse CDN, os prints continuam funcionando — mas apenas com descrição textual, sem captura automática da tela.
+> **Redes corporativas:** se o link acima for bloqueado, acesse o arquivo no GitHub, clique em **Raw**, copie o conteúdo e cole em um novo script no Tampermonkey manualmente.
 
 ---
 
 ## Como usar
 
 ### 1. Iniciar gravação
+
 Clique em **▶ Iniciar Gravação** no painel fixo no canto inferior direito da tela.
 
 ### 2. Execute o teste normalmente
+
 A partir desse momento, as seguintes ações são registradas **automaticamente**:
 
 | Ação | O que é registrado |
@@ -38,19 +42,34 @@ A partir desse momento, as seguintes ações são registradas **automaticamente*
 | Navegação entre páginas | Título da nova página |
 
 ### 3. Registrar prints
-Clique em **📷 Print** para capturar a tela atual:
+
+- Clique em **📷 Print** ou use o atalho **`Alt+P`**
 - O painel some temporariamente durante a captura
 - Uma miniatura aparece no modal para confirmação
-- Adicione uma descrição do que está visível e clique em **Salvar**
+- Adicione uma descrição e clique em **Salvar**
 - O print fica embutido no relatório final
 
 ### 4. Adicionar anotações
-Clique em **✏️ Nota** para registrar observações manuais (anomalias, comportamentos esperados/inesperados, etc.).
+
+- Clique em **✏️ Nota** ou use o atalho **`Alt+A`**
+- Registre observações manuais: anomalias, comportamentos esperados/inesperados, etc.
 
 ### 5. Parar e exportar
-- Clique em **⏹ Parar Gravação** ao finalizar o teste
+
+- Clique em **⏹ Parar** ao finalizar o teste
 - Clique em **⬇ Exportar Relatório** para baixar o arquivo HTML
 - O relatório pode ser aberto no navegador ou impresso (`Ctrl+P`)
+
+---
+
+## Atalhos de teclado
+
+Disponíveis apenas durante a gravação:
+
+| Atalho | Ação |
+|---|---|
+| `Alt+P` | Capturar print da tela atual |
+| `Alt+A` | Abrir modal de anotação |
 
 ---
 
@@ -60,9 +79,9 @@ Clique em **✏️ Nota** para registrar observações manuais (anomalias, compo
 ┌─────────────────────────┐
 │ ● GRAVANDO    12 passos │  ← cabeçalho (arraste para mover)
 ├─────────────────────────┤
-│ Registrando ações...    │
-│ [ ⏹ Parar Gravação   ] │
-│ [ 📷 Print ] [ ✏️ Nota ] │
+│ Registrando ações…      │
+│ [ ⏹ Parar             ] │
+│ [ 📷 Alt+P ] [ ✏️ Alt+A ] │
 │                         │
 │ ▾ log                   │
 │  [10:32] #12 Botão...   │
@@ -77,16 +96,9 @@ Clique em **✏️ Nota** para registrar observações manuais (anomalias, compo
 
 ## Relatório HTML exportado
 
-O arquivo gerado contém uma tabela com todos os passos:
+O arquivo gerado contém todos os passos registrados com descrição humanizada e prints embutidos.
 
-| # | Tipo | Horário | Descrição / Print | Página |
-|---|---|---|---|---|
-| 1 | INÍCIO | 10:30:00 | Gravação iniciada — Consulta Processual | ... |
-| 2 | BOTÃO | 10:30:05 | Botão clicado: "Pesquisar" | ... |
-| 3 | INPUT | 10:30:04 | Campo "Número do Processo": "1234567..." | ... |
-| 4 | PRINT | 10:30:10 | Resultado da pesquisa exibido *(+ imagem)* | ... |
-
-**Tipos de passo:** `INÍCIO` `BOTÃO` `LINK` `MENU` `SELEÇÃO` `INPUT` `ENVIO` `POPUP` `PRINT` `NOTA` `NAVEGAÇÃO`
+**Tipos de passo registrados:** `INÍCIO` `BOTÃO` `LINK` `MENU` `SELEÇÃO` `INPUT` `ENVIO` `POPUP` `PRINT` `NOTA` `NAVEGAÇÃO`
 
 ---
 
@@ -104,11 +116,4 @@ O arquivo gerado contém uma tabela com todos os passos:
 ## Limitações conhecidas
 
 - **Prints não persistem entre navegações** — as imagens ficam em memória. Se a página recarregar completamente antes de exportar, os prints anteriores são perdidos (os passos de texto são mantidos via `sessionStorage`)
-- Se o site bloquear o CDN do `html2canvas`, o botão de print ainda funciona mas sem captura automática da tela
 - Campos do tipo `password` são registrados como `(senha)` por segurança
-
----
-
-## Versão
-
-**4.0.0** — Captura real de tela via html2canvas, registro expandido de cliques (incluindo elementos com `onclick`), captura de campos de texto no `blur`, prints embutidos no relatório HTML.
