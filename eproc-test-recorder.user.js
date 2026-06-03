@@ -8,7 +8,7 @@
 // @include      *://*-1g-*.tjsp.jus.br/*
 // @include      *://*-2g-*.tjsp.jus.br/*
 // @include      *://sso-*.tjsc.jus.br/*
-// @require      https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
+// @require      https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js
 // @grant        GM_addStyle
 // @run-at       document-idle
 // ==/UserScript==
@@ -432,7 +432,7 @@
       btnR.className = 'eb eb-stop'; btnR.textContent = '⏹ Parar Gravação';
       mid.style.display = 'flex'; btnE.style.display = 'none'; btnC.style.display = 'none';
       if (autoRow) autoRow.style.display = 'block';
-      hint.innerHTML = '<span style="color:#2d3748;font-size:10px">Use 📷 para print manual ou ✏️ para anotações.</span>';
+      hint.innerHTML = '<span style="color:#2d3748;font-size:10px">📷 <kbd>Alt+P</kbd> print &nbsp;|&nbsp; ✏️ <kbd>Alt+A</kbd> nota</span>';
     } else {
       led.className = ''; lbl.className = ''; lbl.textContent = 'Gravador';
       head.className = ''; cnt.className = '';
@@ -986,7 +986,7 @@ tr:hover td{background:#f7fafc}
   </tr></thead>
   <tbody>${rows}</tbody>
 </table>
-<p style="text-align:center;color:#cbd5e0;font-size:10px;margin-top:16px">eProc Gravador de Testes v4.0 — ${dBR} ${tBR}</p>
+<p style="text-align:center;color:#cbd5e0;font-size:10px;margin-top:16px">eProc Gravador de Testes v4.3 — ${dBR} ${tBR}</p>
 </body></html>`;
 
     const a = Object.assign(document.createElement('a'), {
@@ -1011,6 +1011,15 @@ tr:hover td{background:#f7fafc}
     } else {
       run();
     }
+
+    // Atalhos de teclado globais (só funcionam durante gravação)
+    document.addEventListener('keydown', e => {
+      if (!recording) return;
+      // Alt+A → Anotação
+      if (e.altKey && e.key === 'a') { e.preventDefault(); openNoteModal(); }
+      // Alt+P → Print manual
+      if (e.altKey && e.key === 'p') { e.preventDefault(); openShotModal(); }
+    }, true);
   }
 
   init();
