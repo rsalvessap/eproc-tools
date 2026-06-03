@@ -1,20 +1,28 @@
 // ==UserScript==
 // @name         eProc Toolkit
 // @namespace    https://github.com/rsalvessap/eproc-tools
-// @version      1.0
+// @version      1.1
 // @description  Conjunto de ferramentas de automação para o eProc TJSP
 // @author       rsalvessap
 // @match        https://eproc1g.tjsp.jus.br/eproc/controlador.php*
+// @match        https://eproc2g.tjsp.jus.br/eproc/controlador.php*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_listValues
 // @grant        unsafeWindow
+// @require      https://raw.githubusercontent.com/rsalvessap/eproc-scripts-gerais/master/shared/eproc-utils.js
 // @run-at       document-start
 // ==/UserScript==
 
 (() => {
   'use strict';
+
+  // Debug: false em produção (true para ver logs no console)
+  const DEBUG = false;
+  const log  = (...a) => DEBUG && console.log('[Toolkit]', ...a);
+  const warn = (...a) => console.warn('[Toolkit]', ...a);
+  const err  = (...a) => console.error('[Toolkit]', ...a);
 
   // =========================================================
   // Config — estado ativo/inativo de cada módulo
@@ -202,7 +210,7 @@
       SUBMIT_DELAY_MS:     300,
       RESULT_TIMEOUT_MS:   120000,
       RATE_LIMIT_DELAY_MS: 30000,
-      REMIGRAR_URL: 'https://eproc1g.tjsp.jus.br/eproc/controlador.php?acao=remigrar_processo'
+      get REMIGRAR_URL() { return `${window.location.origin}/eproc/controlador.php?acao=remigrar_processo`; }
     };
 
     function hashString(str) {
@@ -868,7 +876,7 @@
       QUEUE_KEY:   'eproc_inconsistencias_queue',
       LOG_RETENTION_DAYS: 7,
       ACTION_DELAY_MS: 1500,
-      INCONSISTENCIAS_URL: 'https://eproc1g.tjsp.jus.br/eproc/controlador.php?acao=ProcessoInconsistente/consultar'
+      get INCONSISTENCIAS_URL() { return `${window.location.origin}/eproc/controlador.php?acao=ProcessoInconsistente/consultar`; }
     };
 
     const DUPLICATE_TYPES = ['Justiça Gratuita', 'Litisconsórcio Passivo'];
